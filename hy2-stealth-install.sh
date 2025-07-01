@@ -110,8 +110,12 @@ install_hysteria() {
     exit 1
   fi
   
-  # 跳过简单验证（用户自己确认风险）
-yellow "[*] 跳过 hysteria 安装脚本验证"
+  # 验证下载的脚本不是 HTML 页面
+if grep -q "<html" "$INSTALL_SCRIPT"; then
+  red "[!] 安装脚本返回了 HTML 页面，可能被防火墙拦截"
+  rm -f "$INSTALL_SCRIPT"
+  exit 1
+fi
   
   bash "$INSTALL_SCRIPT"
   rm -f "$INSTALL_SCRIPT"
