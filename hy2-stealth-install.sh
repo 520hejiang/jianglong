@@ -111,7 +111,7 @@ install_hysteria() {
   fi
   
   # 简单验证脚本内容
-  if ! grep -q "hysteria" "$INSTALL_SCRIPT"; then
+  if ! grep -qE 'https://.*github.*hysteria' "$INSTALL_SCRIPT"; then
     red "[!] 安装脚本验证失败"
     rm -f "$INSTALL_SCRIPT"
     exit 1
