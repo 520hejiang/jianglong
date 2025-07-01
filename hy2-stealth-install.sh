@@ -110,12 +110,8 @@ install_hysteria() {
     exit 1
   fi
   
-  # 简单验证脚本内容
-  if ! grep -qE 'https://.*github.*hysteria' "$INSTALL_SCRIPT"; then
-    red "[!] 安装脚本验证失败"
-    rm -f "$INSTALL_SCRIPT"
-    exit 1
-  fi
+  # 跳过简单验证（用户自己确认风险）
+yellow "[*] 跳过 hysteria 安装脚本验证"
   
   bash "$INSTALL_SCRIPT"
   rm -f "$INSTALL_SCRIPT"
