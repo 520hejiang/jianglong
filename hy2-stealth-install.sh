@@ -99,32 +99,31 @@ set_port() {
   yellow "[*] 使用端口: $PORT"
 }
 
-# 验证Hysteria2安装
+# 安装 Hysteria2
 install_hysteria() {
-  yellow "[*] 安装 Hysteria2..."
-  
-  # 验证下载的脚本
-  INSTALL_SCRIPT=$(mktemp)
-  if ! curl -s https://get.hy2.sh -o "$INSTALL_SCRIPT"; then
-    red "[!] 下载安装脚本失败"
-    exit 1
-  fi
-  
-  # 简单验证脚本内容
-  if ! grep -q "hysteria" "$INSTALL_SCRIPT"; then
-    red "[!] 安装脚本验证失败"
+    yellow "[*] 安装 Hysteria2..."
+    
+    INSTALL_SCRIPT=$(mktemp)
+    if ! curl -fsSL https://get.hy2.sh -o "$INSTALL_SCRIPT"; then
+        red "[!] 下载失败"
+        exit 1
+    fi
+    
+    if ! grep -q "hysteria" "$INSTALL_SCRIPT"; then
+        red "[!] 脚本验证失败"
+        rm -f "$INSTALL_SCRIPT"
+        exit 1
+    fi
+    
+    bash "$INSTALL_SCRIPT"
     rm -f "$INSTALL_SCRIPT"
-    exit 1
-  fi
-  
-  bash "$INSTALL_SCRIPT"
-  rm -f "$INSTALL_SCRIPT"
-  
-  # 验证安装结果
-  if ! command -v hysteria &> /dev/null; then
-    red "[!] Hysteria2 安装失败"
-    exit 1
-  fi
+    
+    if ! command -v hysteria &> /dev/null; then
+        red "[!] 安装失败"
+        exit 1
+    fi
+    
+    green "[*] Hysteria2 安装成功"
 }
 
 # 生成强密码和安全配置
