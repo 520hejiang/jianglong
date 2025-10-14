@@ -39,7 +39,7 @@ done
 install_deps() {
   yellow "[*] 安装依赖中..."
   ${PACKAGE_UPDATE[PKG_INDEX]}
-  ${PACKAGE_INSTALL[PKG_INDEX]} curl wget qrencode openssl iptables-persistent netfilter-persistent ufw fail2ban
+  ${PACKAGE_INSTALL[PKG_INDEX]} curl wget qrencode openssl iptables-persistent netfilter-persistent ufw fail2ban certbot
   
   # 配置 fail2ban 防暴力破解
   if ! systemctl is-active --quiet fail2ban; then
@@ -49,7 +49,6 @@ install_deps() {
 
 # 获取 IP (增加隐私保护)
 get_ip() {
-  # 使用多个IP检测源，避免单点依赖
   IP_SOURCES=("https://icanhazip.com" "https://ipv4.icanhazip.com" "https://api.ipify.org" "https://ifconfig.me/ip")
   
   for source in "${IP_SOURCES[@]}"; do
@@ -61,39 +60,102 @@ get_ip() {
   yellow "[*] 检测到公网IP: $IP"
 }
 
-# 生成更安全的证书
+# 生成更安全的证书（增强版）
 generate_cert() {
   mkdir -p "$CONFIG_DIR"
   chmod 700 "$CONFIG_DIR"
   
-  # 生成更强的私钥
-  openssl ecparam -genkey -name secp384r1 -out "$CONFIG_DIR/private.key"
+  yellow "[*] 证书生成方式："
+  echo "1) 使用真实域名申请 Let's Encrypt 证书（推荐，最隐蔽）"
+  echo "2) 生成自签名证书（快速，但特征明显）"
+  read -p "请选择 [1-2]: " cert_choice
   
-  # 生成更真实的证书信息，增加隐蔽性
-  FAKE_DOMAINS=("cloudflare.com" "google.com" "microsoft.com" "amazon.com" "github.com")
-  FAKE_DOMAIN=${FAKE_DOMAINS[$RANDOM % ${#FAKE_DOMAINS[@]}]}
+  if [[ "$cert_choice" == "1" ]]; then
+    read -p "请输入你的域名（如 example.com）: " DOMAIN
+    
+    if [[ -z "$DOMAIN" ]]; then
+      red "[!] 域名不能为空"
+      exit 1
+    fi
+    
+    yellow "[*] 申请 Let's Encrypt 证书..."
+    yellow "[!] 请确保域名已解析到此服务器 IP: $IP"
+    read -p "域名是否已正确解析？(y/n): " dns_confirm
+    
+    if [[ "$dns_confirm" != "y" ]]; then
+      red "[!] 请先配置域名解析后再运行脚本"
+      exit 1
+    fi
+    
+    # 临时启动一个简单的HTTP服务用于验证
+    certbot certonly --standalone -d "$DOMAIN" --non-interactive --agree-tos --email admin@"$DOMAIN" --http-01-port 80
+    
+    if [[ $? -eq 0 ]]; then
+      ln -sf /etc/letsencrypt/live/"$DOMAIN"/fullchain.pem "$CONFIG_DIR/cert.crt"
+      ln -sf /etc/letsencrypt/live/"$DOMAIN"/privkey.pem "$CONFIG_DIR/private.key"
+      USE_REAL_CERT=true
+      SNI_DOMAIN="$DOMAIN"
+      green "[*] Let's Encrypt 证书申请成功"
+    else
+      red "[!] 证书申请失败，将使用自签名证书"
+      USE_REAL_CERT=false
+    fi
+  else
+    USE_REAL_CERT=false
+  fi
   
-  openssl req -new -x509 -days 36500 -key "$CONFIG_DIR/private.key" \
-    -out "$CONFIG_DIR/cert.crt" -subj "/C=US/ST=CA/L=San Francisco/O=Tech Company/CN=$FAKE_DOMAIN"
+  # 如果没有使用真实证书，生成自签名证书
+  if [[ "$USE_REAL_CERT" != "true" ]]; then
+    openssl ecparam -genkey -name secp384r1 -out "$CONFIG_DIR/private.key"
+    
+    # 更真实的证书信息
+    FAKE_DOMAINS=("cloudflare.com" "www.google.com" "api.github.com" "cdn.jsdelivr.net" "www.microsoft.com")
+    FAKE_DOMAIN=${FAKE_DOMAINS[$RANDOM % ${#FAKE_DOMAINS[@]}]}
+    SNI_DOMAIN="$FAKE_DOMAIN"
+    
+    openssl req -new -x509 -days 36500 -key "$CONFIG_DIR/private.key" \
+      -out "$CONFIG_DIR/cert.crt" -subj "/C=US/ST=CA/L=San Francisco/O=Tech Company/CN=$FAKE_DOMAIN"
+  fi
   
-  # 设置更严格的权限
   chmod 600 "$CONFIG_DIR/private.key"
   chmod 644 "$CONFIG_DIR/cert.crt"
   chown -R root:root "$CONFIG_DIR"
 }
 
-# 固定使用443端口
+# 智能端口选择（增强防封）
 set_port() {
-  PORT=443
+  yellow "[*] 端口选择策略："
+  echo "1) 443 (HTTPS标准端口，混淆性好但容易被针对)"
+  echo "2) 80 (HTTP标准端口，伪装性好)"
+  echo "3) 8443 (常见替代HTTPS端口)"
+  echo "4) 随机高位端口 (10000-60000，避免扫描)"
+  echo "5) 自定义端口"
+  read -p "请选择 [1-5，默认4]: " port_choice
+  
+  case "$port_choice" in
+    1) PORT=443 ;;
+    2) PORT=80 ;;
+    3) PORT=8443 ;;
+    5) 
+      read -p "请输入端口号 (1-65535): " PORT
+      if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+        red "[!] 无效端口"
+        exit 1
+      fi
+      ;;
+    *)
+      # 随机高位端口
+      PORT=$((RANDOM % 50000 + 10000))
+      ;;
+  esac
   
   # 检查端口是否被占用
-  if ss -tlnp | grep -q ":443 "; then
-    red "[!] 端口 443 已被占用，请检查并关闭占用该端口的服务"
-    yellow "[*] 常见占用443端口的服务："
-    yellow "    - Apache: systemctl stop apache2"
-    yellow "    - Nginx: systemctl stop nginx"
-    yellow "    - 其他Web服务器"
-    exit 1
+  if ss -tlnp | grep -q ":$PORT "; then
+    red "[!] 端口 $PORT 已被占用"
+    yellow "[*] 正在尝试自动选择可用端口..."
+    while ss -tlnp | grep -q ":$PORT "; do
+      PORT=$((RANDOM % 50000 + 10000))
+    done
   fi
   
   yellow "[*] 使用端口: $PORT"
@@ -126,15 +188,25 @@ install_hysteria() {
     green "[*] Hysteria2 安装成功"
 }
 
-# 生成强密码和安全配置
+# 生成强密码和安全配置（增强版）
 write_config() {
-  # 生成更强的密码 (16字符)
-  PASS=$(openssl rand -base64 12 | tr -d "=+/" | cut -c1-16)
+  # 生成更强的密码 (24字符，更复杂)
+  PASS=$(openssl rand -base64 18 | tr -d "=+/" | cut -c1-24)
   
   mkdir -p "$CLIENT_DIR"
   chmod 700 "$CLIENT_DIR"
 
-  # 服务端配置 - 增加安全选项
+  # 选择伪装网站
+  MASQUERADE_SITES=(
+    "https://www.bing.com"
+    "https://www.wikipedia.org"
+    "https://www.cloudflare.com"
+    "https://www.microsoft.com"
+    "https://www.apple.com"
+  )
+  MASQUERADE_URL=${MASQUERADE_SITES[$RANDOM % ${#MASQUERADE_SITES[@]}]}
+
+  # 服务端配置 - 增强防检测
   cat > "$CONFIG_DIR/config.yaml" <<EOF
 listen: :$PORT
 
@@ -149,63 +221,92 @@ auth:
 masquerade:
   type: proxy
   proxy:
-    url: https://www.bing.com
+    url: $MASQUERADE_URL
     rewriteHost: true
 
-# 安全配置
+# 流量混淆配置（关键防检测参数）
 quic:
   initStreamReceiveWindow: 8388608
   maxStreamReceiveWindow: 8388608
-  initConnReceiveWindow: 16777216
-  maxConnReceiveWindow: 16777216
-  maxIdleTimeout: 30s
-  keepAlivePeriod: 10s
+  initConnReceiveWindow: 20971520
+  maxConnReceiveWindow: 20971520
+  maxIdleTimeout: 60s
+  keepAlivePeriod: 15s
   maxIncomingStreams: 1024
+  disablePathMTUDiscovery: false
 
-# 限制并发连接
+# 流量整形，模拟正常流量
 bandwidth:
-  up: 1000 mbps
-  down: 1000 mbps
+  up: 500 mbps
+  down: 500 mbps
 
-# 日志配置
+# 忽略客户端带宽
+ignoreClientBandwidth: false
+
+# 禁用UDP转发（减少特征）
+disableUDP: false
+
+# 速度限制（避免异常流量）
+speedTest: false
+
+# 最小化日志
 log:
-  level: warn
+  level: error
   file: $LOG_FILE
+
+# ACL规则（可选）
+acl:
+  inline:
+    - reject(all, udp/443)
+    - reject(all, udp/80)
 EOF
 
-  # 客户端配置
+  # 客户端配置 - 增强稳定性
   cat > "$CLIENT_DIR/client.yaml" <<EOF
 server: $IP:$PORT
 auth: $PASS
 
 tls:
-  sni: www.bing.com
+  sni: $SNI_DOMAIN
   insecure: true
 
 quic:
   initStreamReceiveWindow: 8388608
   maxStreamReceiveWindow: 8388608
-  initConnReceiveWindow: 16777216
-  maxConnReceiveWindow: 16777216
+  initConnReceiveWindow: 20971520
+  maxConnReceiveWindow: 20971520
+  disablePathMTUDiscovery: false
 
+# 快速打开
 fastOpen: true
 
 socks5:
   listen: 127.0.0.1:1080
 
+http:
+  listen: 127.0.0.1:1081
+
+# 传输优化
 transport:
   udp:
     hopInterval: 30s
 
-# 客户端安全配置
+# 带宽
+bandwidth:
+  up: 100 mbps
+  down: 100 mbps
+
+# 连接管理
 lazy: false
+tcpForwarding:
+  - listen: 127.0.0.1:6666
+    remote: 127.0.0.1:6666
 EOF
 
   # 生成连接链接
-  LINK="hysteria2://$PASS@$IP:$PORT/?insecure=1&sni=www.bing.com#HY2-$(date +%s)"
+  LINK="hysteria2://$PASS@$IP:$PORT/?insecure=1&sni=$SNI_DOMAIN#HY2-Stealth-$(date +%s)"
   echo "$LINK" > "$CLIENT_DIR/link.txt"
   
-  # 设置文件权限
   chmod 600 "$CLIENT_DIR/client.yaml"
   chmod 600 "$CLIENT_DIR/link.txt"
   chown -R root:root "$CLIENT_DIR"
@@ -223,20 +324,19 @@ Wants=network.target
 Type=simple
 User=root
 ExecStart=/usr/local/bin/hysteria server -c $CONFIG_DIR/config.yaml
-Restart=on-failure
-RestartSec=3
+Restart=always
+RestartSec=5
 LimitNOFILE=1048576
 
-# 安全配置
+# 安全加固
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=$CONFIG_DIR /var/log
+ReadWritePaths=$CONFIG_DIR /var/log /etc/letsencrypt
 PrivateTmp=true
 ProtectControlGroups=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
-MemoryDenyWriteExecute=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
 
@@ -249,12 +349,19 @@ EOF
   
   if ! systemctl start hysteria2; then
     red "[!] Hysteria2 服务启动失败"
-    journalctl -u hysteria2 --no-pager -n 20
+    journalctl -u hysteria2 --no-pager -n 30
     exit 1
+  fi
+  
+  sleep 2
+  if systemctl is-active --quiet hysteria2; then
+    green "[*] Hysteria2 服务运行正常"
+  else
+    red "[!] 服务可能存在问题"
   fi
 }
 
-# 配置防火墙
+# 配置防火墙（增强版）
 configure_firewall() {
   yellow "[*] 配置防火墙..."
   
@@ -263,65 +370,140 @@ configure_firewall() {
     ufw --force reset
     ufw default deny incoming
     ufw default allow outgoing
-    ufw allow ssh
+    
+    # 允许SSH（根据实际情况修改端口）
+    ufw allow 22/tcp comment 'SSH'
+    
+    # 允许Hysteria2端口
     ufw allow $PORT/udp comment 'Hysteria2'
+    
+    # 如果使用80端口做证书验证
+    if [[ "$PORT" != "80" ]] && [[ "$USE_REAL_CERT" == "true" ]]; then
+      ufw allow 80/tcp comment 'Certbot'
+    fi
+    
     ufw --force enable
   fi
   
-  # iptables配置作为备份
+  # iptables规则优化
   iptables -I INPUT -p udp --dport $PORT -j ACCEPT
   iptables -I INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
   
-  # 保存iptables规则
+  # 防止端口扫描
+  iptables -A INPUT -p tcp --tcp-flags ALL NONE -j DROP
+  iptables -A INPUT -p tcp --tcp-flags ALL ALL -j DROP
+  
+  # 限制连接速率（防DDoS）
+  iptables -A INPUT -p udp --dport $PORT -m hashlimit --hashlimit-name hysteria2 --hashlimit-above 50/sec --hashlimit-burst 100 --hashlimit-mode srcip -j DROP
+  
+  # 保存规则
   if command -v iptables-save &> /dev/null; then
     iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
   fi
 }
 
-# 系统优化
+# 系统优化（增强版）
 optimize_system() {
   yellow "[*] 优化系统参数..."
   
   # 网络优化
   cat >> /etc/sysctl.conf <<EOF
 
-# Hysteria2 优化
-net.core.rmem_max = 16777216
-net.core.wmem_max = 16777216
-net.ipv4.tcp_rmem = 4096 65536 16777216
-net.ipv4.tcp_wmem = 4096 65536 16777216
-net.core.netdev_max_backlog = 4096
+# Hysteria2 优化配置
+net.core.rmem_max = 33554432
+net.core.wmem_max = 33554432
+net.ipv4.tcp_rmem = 4096 87380 33554432
+net.ipv4.tcp_wmem = 4096 65536 33554432
+net.core.netdev_max_backlog = 16384
 net.ipv4.tcp_congestion_control = bbr
 net.core.default_qdisc = fq
 net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_mtu_probing = 1
 fs.file-max = 1048576
+net.ipv4.ip_forward = 1
+net.ipv4.conf.all.route_localnet = 1
 EOF
 
   sysctl -p
 
   # 设置ulimit
-  echo "* soft nofile 1048576" >> /etc/security/limits.conf
-  echo "* hard nofile 1048576" >> /etc/security/limits.conf
+  cat >> /etc/security/limits.conf <<EOF
+* soft nofile 1048576
+* hard nofile 1048576
+* soft nproc 1048576
+* hard nproc 1048576
+EOF
 }
 
-# 清理安装痕迹
+# 增强隐蔽性配置
+enhance_stealth() {
+  yellow "[*] 配置隐蔽性增强..."
+  
+  # 修改SSH端口（可选）
+  read -p "是否修改SSH端口以增强安全性？(y/n，默认n): " change_ssh
+  if [[ "$change_ssh" == "y" ]]; then
+    NEW_SSH_PORT=$((RANDOM % 20000 + 10000))
+    sed -i "s/#Port 22/Port $NEW_SSH_PORT/" /etc/ssh/sshd_config
+    sed -i "s/Port 22/Port $NEW_SSH_PORT/" /etc/ssh/sshd_config
+    systemctl restart sshd
+    yellow "[!] SSH端口已修改为: $NEW_SSH_PORT"
+    yellow "[!] 请记住新端口，否则可能无法连接！"
+  fi
+  
+  # 禁用不必要的服务
+  services_to_disable=("bluetooth" "cups" "avahi-daemon")
+  for service in "${services_to_disable[@]}"; do
+    if systemctl is-active --quiet "$service" 2>/dev/null; then
+      systemctl stop "$service" 2>/dev/null
+      systemctl disable "$service" 2>/dev/null
+    fi
+  done
+  
+  # 配置时间同步（避免时间偏差导致的连接问题）
+  timedatectl set-ntp true 2>/dev/null || true
+}
+
+# 清理安装痕迹（增强版）
 cleanup_traces() {
   yellow "[*] 清理安装痕迹..."
   
-  # 清理历史记录中的敏感信息
+  # 清理历史记录
   history -c
   echo "" > ~/.bash_history
   
-  # 创建定期日志清理任务
+  # 清理apt缓存
+  if command -v apt &> /dev/null; then
+    apt clean
+  fi
+  
+  # 定期日志清理和轮转
+  cat > /etc/logrotate.d/hysteria2 <<EOF
+$LOG_FILE {
+    daily
+    rotate 3
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 root root
+    sharedscripts
+    postrotate
+        systemctl reload hysteria2 > /dev/null 2>&1 || true
+    endscript
+}
+EOF
+
+  # 创建定期清理任务
   cat > /etc/cron.daily/hysteria2-cleanup <<EOF
 #!/bin/bash
-# 保留最近7天的日志
-find /var/log -name "*hysteria*" -type f -mtime +7 -delete 2>/dev/null
 # 限制日志文件大小
-if [[ -f "$LOG_FILE" && \$(stat -c%s "$LOG_FILE") -gt 10485760 ]]; then
-    tail -n 1000 "$LOG_FILE" > "$LOG_FILE.tmp"
-    mv "$LOG_FILE.tmp" "$LOG_FILE"
+if [[ -f "$LOG_FILE" && \$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0) -gt 10485760 ]]; then
+    tail -n 500 "$LOG_FILE" > "$LOG_FILE.tmp" 2>/dev/null
+    mv "$LOG_FILE.tmp" "$LOG_FILE" 2>/dev/null
 fi
+# 清理旧的系统日志
+find /var/log -type f -name "*.log" -mtime +7 -exec truncate -s 0 {} \; 2>/dev/null
 EOF
   chmod +x /etc/cron.daily/hysteria2-cleanup
 }
@@ -329,70 +511,136 @@ EOF
 # 生成使用说明
 generate_usage_info() {
   cat > "$CLIENT_DIR/usage.txt" <<EOF
-Hysteria2 配置信息
-==================
+==============================================
+    Hysteria2 增强隐蔽版 - 配置信息
+==============================================
 
-服务器信息：
-- IP: $IP
+【服务器信息】
+- IP地址: $IP
 - 端口: $PORT
 - 密码: $PASS
+- SNI域名: $SNI_DOMAIN
+- 伪装网站: $MASQUERADE_URL
 
-客户端配置文件: $CLIENT_DIR/client.yaml
-连接链接: $(cat "$CLIENT_DIR/link.txt")
-
-服务管理命令：
-- 启动服务: systemctl start hysteria2
-- 停止服务: systemctl stop hysteria2
-- 重启服务: systemctl restart hysteria2
-- 查看状态: systemctl status hysteria2
-- 查看日志: journalctl -u hysteria2 -f
-
-配置文件位置：
+【文件位置】
 - 服务端配置: $CONFIG_DIR/config.yaml
 - 客户端配置: $CLIENT_DIR/client.yaml
+- 连接链接: $CLIENT_DIR/link.txt
+- 使用说明: $CLIENT_DIR/usage.txt
 
-安全建议：
-1. 定期更换密码
-2. 监控服务日志
-3. 保持系统更新
-4. 不要在不安全的网络中传输配置信息
+【服务管理】
+启动: systemctl start hysteria2
+停止: systemctl stop hysteria2
+重启: systemctl restart hysteria2
+状态: systemctl status hysteria2
+日志: journalctl -u hysteria2 -f
 
+【客户端连接】
+1. V2rayN/Clash等客户端: 导入下方连接链接
+2. Hysteria2官方客户端: 使用client.yaml配置文件
+
+连接链接:
+$(cat "$CLIENT_DIR/link.txt")
+
+【安全建议】
+✓ 定期更换密码和端口
+✓ 监控服务器流量和日志
+✓ 保持系统和软件更新
+✓ 不要分享配置信息给不信任的人
+✓ 使用前测试连接稳定性
+✓ 建议搭配CDN使用（如Cloudflare）
+
+【防封建议】
+✓ 避免大流量突发使用
+✓ 模拟正常用户行为
+✓ 定期更换服务器IP
+✓ 使用多个备用节点
+✓ 关注服务器日志异常
+
+【故障排查】
+1. 无法连接: 检查防火墙和端口
+2. 速度慢: 调整带宽限制
+3. 频繁断线: 检查网络质量和MTU设置
+
+【更新配置】
+修改配置后执行: systemctl restart hysteria2
+
+==============================================
 EOF
   chmod 600 "$CLIENT_DIR/usage.txt"
 }
 
+# 连接测试
+test_connection() {
+  yellow "[*] 正在测试服务..."
+  sleep 3
+  
+  if systemctl is-active --quiet hysteria2; then
+    green "[✓] 服务运行正常"
+    
+    # 检查端口监听
+    if ss -tuln | grep -q ":$PORT "; then
+      green "[✓] 端口监听正常"
+    else
+      yellow "[!] 端口未正确监听，请检查配置"
+    fi
+  else
+    red "[✗] 服务未运行"
+    yellow "[*] 查看日志: journalctl -u hysteria2 -n 50"
+  fi
+}
+
 # 主流程
 main() {
-  yellow "[*] 开始安装 Hysteria2 (安全增强版)"
+  clear
+  green "=========================================="
+  green "   Hysteria2 增强隐蔽版安装脚本"
+  green "=========================================="
+  echo ""
   
   install_deps
   get_ip
-  set_port
   generate_cert
+  set_port
   install_hysteria
   write_config
   create_service
   configure_firewall
   optimize_system
+  enhance_stealth
   cleanup_traces
   generate_usage_info
+  test_connection
 
-  green "\n[*] Hysteria2 安装完成 ✅"
-  echo "========================================"
-  yellow "服务器IP：$IP"
-  yellow "端口：$PORT"
-  yellow "密码：$PASS"
-  yellow "配置目录：$CONFIG_DIR"
-  yellow "客户端配置：$CLIENT_DIR"
-  echo "========================================"
-  yellow "连接链接："
-  echo "$(cat "$CLIENT_DIR/link.txt")"
   echo ""
-  yellow "二维码："
-  qrencode -t ANSIUTF8 "$(cat "$CLIENT_DIR/link.txt")"
+  green "=========================================="
+  green "        安装完成 ✅"
+  green "=========================================="
   echo ""
-  green "[*] 详细使用说明请查看: $CLIENT_DIR/usage.txt"
-  yellow "[*] 服务状态检查: systemctl status hysteria2"
+  yellow "【服务器信息】"
+  echo "  IP: $IP"
+  echo "  端口: $PORT"
+  echo "  密码: $PASS"
+  echo "  SNI: $SNI_DOMAIN"
+  echo ""
+  yellow "【配置文件】"
+  echo "  服务端: $CONFIG_DIR/config.yaml"
+  echo "  客户端: $CLIENT_DIR/client.yaml"
+  echo ""
+  yellow "【连接链接】"
+  cat "$CLIENT_DIR/link.txt"
+  echo ""
+  
+  if command -v qrencode &> /dev/null; then
+    yellow "【二维码】"
+    qrencode -t ANSIUTF8 "$(cat "$CLIENT_DIR/link.txt")"
+    echo ""
+  fi
+  
+  green "详细说明: $CLIENT_DIR/usage.txt"
+  yellow "服务状态: systemctl status hysteria2"
+  echo ""
+  yellow "=========================================="
 }
 
 main
