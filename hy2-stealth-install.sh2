@@ -1,0 +1,521 @@
+#!/bin/bash
+
+export LANG=en_US.UTF-8
+
+RED="\033[31m"
+GREEN="\033[32m"
+YELLOW="\033[33m"
+PLAIN="\033[0m"
+
+red() { echo -e "${RED}$1${PLAIN}"; }
+green() { echo -e "${GREEN}$1${PLAIN}"; }
+yellow() { echo -e "${YELLOW}$1${PLAIN}"; }
+
+CONFIG_DIR="/etc/hysteria2"
+CLIENT_DIR="/root/hysteria2-client"
+LOG_FILE="/var/log/hysteria2.log"
+NGINX_DIR="/var/www/fake-site"
+
+[[ $EUID -ne 0 ]] && red "[!] 请使用 root 用户运行本脚本！" && exit 1
+
+SYSTEM=""
+CMD=("$(grep -i pretty_name /etc/os-release 2>/dev/null | cut -d \" -f2)" "$(hostnamectl 2>/dev/null | grep -i system | cut -d : -f2)" "$(lsb_release -sd 2>/dev/null)")
+REGEX=("debian" "ubuntu" "centos")
+RELEASE=("Debian" "Ubuntu" "CentOS")
+PACKAGE_INSTALL=("apt -y install" "apt -y install" "yum -y install")
+PACKAGE_UPDATE=("apt update -y" "apt update -y" "yum update -y")
+
+for i in "${CMD[@]}"; do
+  SYS="$i" && [[ -n $SYS ]] && break
+done
+
+for ((i = 0; i < ${#REGEX[@]}; i++)); do
+  [[ $(echo "$SYS" | tr '[:upper:]' '[:lower:]') =~ ${REGEX[i]} ]] && SYSTEM="${RELEASE[i]}" && PKG_INDEX=$i && break
+done
+
+[[ -z $SYSTEM ]] && red "[!] 暂不支持该系统！" && exit 1
+
+install_deps() {
+  yellow "[*] 安装依赖中..."
+  ${PACKAGE_UPDATE[PKG_INDEX]}
+  ${PACKAGE_INSTALL[PKG_INDEX]} curl wget qrencode openssl iptables-persistent netfilter-persistent ufw fail2ban certbot nginx git unzip
+  if ! systemctl is-active --quiet fail2ban; then
+    systemctl enable --now fail2ban
+  fi
+  green "[*] 依赖安装完成"
+}
+
+get_ip() {
+  IP_SOURCES=("https://icanhazip.com" "https://ipv4.icanhazip.com" "https://api.ipify.org")
+  for source in "${IP_SOURCES[@]}"; do
+    IP=$(curl -s --connect-timeout 5 --max-time 10 "$source" 2>/dev/null | grep -E '^[0-9.]+$')
+    [[ -n "$IP" ]] && break
+  done
+  [[ -z "$IP" ]] && red "[!] 无法获取公网 IP" && exit 1
+  yellow "[*] 检测到公网IP: $IP"
+}
+
+generate_cert() {
+  mkdir -p "$CONFIG_DIR"
+  chmod 700 "$CONFIG_DIR"
+  yellow "[*] 证书生成方式："
+  echo "1) 使用真实域名申请 Let's Encrypt 证书（推荐）"
+  echo "2) 生成自签名证书"
+  read -p "请选择 [1-2]: " cert_choice
+  
+  if [[ "$cert_choice" == "1" ]]; then
+    read -p "请输入域名: " DOMAIN
+    [[ -z "$DOMAIN" ]] && red "[!] 域名不能为空" && exit 1
+    yellow "[!] 请确保域名已解析到: $IP"
+    read -p "域名是否已正确解析？(y/n): " dns_confirm
+    [[ "$dns_confirm" != "y" ]] && red "[!] 请先配置域名解析" && exit 1
+    
+    systemctl stop nginx 2>/dev/null || true
+    certbot certonly --standalone -d "$DOMAIN" --non-interactive --agree-tos --email admin@"$DOMAIN" --http-01-port 80
+    
+    if [[ $? -eq 0 ]]; then
+      ln -sf /etc/letsencrypt/live/"$DOMAIN"/fullchain.pem "$CONFIG_DIR/cert.crt"
+      ln -sf /etc/letsencrypt/live/"$DOMAIN"/privkey.pem "$CONFIG_DIR/private.key"
+      USE_REAL_CERT=true
+      SNI_DOMAIN="$DOMAIN"
+      green "[*] 证书申请成功"
+      (crontab -l 2>/dev/null; echo "0 3 * * * certbot renew --quiet --deploy-hook 'systemctl reload nginx && systemctl restart hysteria2'") | crontab -
+    else
+      USE_REAL_CERT=false
+    fi
+  else
+    USE_REAL_CERT=false
+  fi
+  
+  if [[ "$USE_REAL_CERT" != "true" ]]; then
+    openssl ecparam -genkey -name secp384r1 -out "$CONFIG_DIR/private.key"
+    FAKE_DOMAINS=("cloudflare.com" "www.google.com" "api.github.com")
+    FAKE_DOMAIN=${FAKE_DOMAINS[$RANDOM % ${#FAKE_DOMAINS[@]}]}
+    SNI_DOMAIN="$FAKE_DOMAIN"
+    openssl req -new -x509 -days 36500 -key "$CONFIG_DIR/private.key" -out "$CONFIG_DIR/cert.crt" -subj "/C=US/ST=CA/O=Tech/CN=$FAKE_DOMAIN"
+  fi
+  
+  chmod 600 "$CONFIG_DIR/private.key"
+  chmod 644 "$CONFIG_DIR/cert.crt"
+}
+
+set_port() {
+  yellow "[*] 端口选择："
+  echo "1) 443 (推荐)"
+  echo "2) 8443"
+  echo "3) 随机端口"
+  echo "4) 自定义"
+  read -p "请选择 [1-4]: " port_choice
+  
+  case "$port_choice" in
+    1) PORT=443 ;;
+    2) PORT=8443 ;;
+    4) 
+      read -p "请输入端口: " PORT
+      [[ ! "$PORT" =~ ^[0-9]+$ ]] && red "[!] 无效端口" && exit 1
+      ;;
+    *) PORT=443 ;;
+  esac
+  
+  if ss -tlnp | grep -q ":$PORT "; then
+    PORT=$((RANDOM % 50000 + 10000))
+  fi
+  yellow "[*] 使用端口: $PORT"
+}
+
+install_hysteria() {
+  yellow "[*] 安装 Hysteria2..."
+  INSTALL_SCRIPT=$(mktemp)
+  curl -fsSL https://get.hy2.sh -o "$INSTALL_SCRIPT" || { red "[!] 下载失败"; exit 1; }
+  bash "$INSTALL_SCRIPT"
+  rm -f "$INSTALL_SCRIPT"
+  command -v hysteria &> /dev/null || { red "[!] 安装失败"; exit 1; }
+  green "[*] Hysteria2 安装成功"
+}
+
+generate_salamander_key() {
+  SALAMANDER_KEY=$(openssl rand -hex 16)
+  yellow "[*] Salamander密钥: $SALAMANDER_KEY"
+}
+
+deploy_fake_website() {
+  yellow "[*] 部署伪装网站..."
+  echo "1) 克隆真实网站"
+  echo "2) 使用模板"
+  echo "3) 简单页面"
+  read -p "选择 [1-3]: " site_choice
+  
+  mkdir -p "$NGINX_DIR"
+  
+  if [[ "$site_choice" == "1" ]]; then
+    read -p "输入URL: " CLONE_URL
+    [[ -n "$CLONE_URL" ]] && wget -q --mirror --convert-links -P "$NGINX_DIR" "$CLONE_URL" 2>/dev/null || site_choice=3
+  elif [[ "$site_choice" == "2" ]]; then
+    wget -q -O /tmp/tpl.zip "https://github.com/BlackrockDigital/startbootstrap-landing-page/archive/master.zip" 2>/dev/null && \
+    unzip -q /tmp/tpl.zip -d /tmp/ && cp -r /tmp/startbootstrap-landing-page-master/* "$NGINX_DIR/" && \
+    rm -rf /tmp/tpl.zip /tmp/startbootstrap-landing-page-master || site_choice=3
+  fi
+  
+  if [[ "$site_choice" == "3" ]] || [[ ! -f "$NGINX_DIR/index.html" ]]; then
+    cat > "$NGINX_DIR/index.html" <<'HTMLEOF'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cloud Services</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;line-height:1.6;color:#333}
+header{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#fff;padding:2rem 0}
+.container{max-width:1200px;margin:0 auto;padding:0 20px}
+h1{font-size:2.5rem;margin-bottom:1rem}
+.features{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:2rem;padding:4rem 0}
+.feature{padding:2rem;background:#f8f9fa;border-radius:8px;text-align:center}
+.feature h3{color:#667eea;margin-bottom:1rem}
+footer{background:#2c3e50;color:#fff;text-align:center;padding:2rem 0;margin-top:4rem}
+</style>
+</head>
+<body>
+<header>
+<div class="container">
+<h1>Enterprise Cloud Solutions</h1>
+<p>Secure, Scalable, Reliable Infrastructure</p>
+</div>
+</header>
+<div class="container">
+<div class="features">
+<div class="feature">
+<h3>🔒 Security</h3>
+<p>Enterprise-grade security with end-to-end encryption.</p>
+</div>
+<div class="feature">
+<h3>⚡ Performance</h3>
+<p>99.99% uptime with global CDN.</p>
+</div>
+<div class="feature">
+<h3>📈 Scalable</h3>
+<p>Scale seamlessly as you grow.</p>
+</div>
+</div>
+</div>
+<footer>
+<div class="container">
+<p>&copy; 2025 Cloud Services. All rights reserved.</p>
+</div>
+</footer>
+</body>
+</html>
+HTMLEOF
+  fi
+  chmod -R 755 "$NGINX_DIR"
+  green "[*] 伪装网站部署完成"
+}
+
+configure_nginx() {
+  yellow "[*] 配置 Nginx..."
+  [[ -f /etc/nginx/nginx.conf ]] && cp /etc/nginx/nginx.conf /etc/nginx/nginx.conf.bak
+  
+  cat > /etc/nginx/sites-available/hysteria2 <<NGINXEOF
+limit_req_zone \$binary_remote_addr zone=general:10m rate=10r/s;
+limit_conn_zone \$binary_remote_addr zone=addr:10m;
+
+server {
+    listen 80;
+    server_name ${SNI_DOMAIN} _;
+    return 301 https://\$server_name\$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name ${SNI_DOMAIN} _;
+    
+    ssl_certificate ${CONFIG_DIR}/cert.crt;
+    ssl_certificate_key ${CONFIG_DIR}/private.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256;
+    ssl_prefer_server_ciphers off;
+    
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    
+    limit_req zone=general burst=20 nodelay;
+    limit_conn addr 10;
+    
+    root ${NGINX_DIR};
+    index index.html;
+    
+    location / {
+        try_files \$uri \$uri/ =404;
+    }
+    
+    location /api/ {
+        return 200 '{"status":"ok"}';
+        add_header Content-Type application/json;
+    }
+    
+    location /robots.txt {
+        return 200 "User-agent: *\nDisallow: /admin/\n";
+    }
+    
+    server_tokens off;
+}
+NGINXEOF
+
+  ln -sf /etc/nginx/sites-available/hysteria2 /etc/nginx/sites-enabled/
+  rm -f /etc/nginx/sites-enabled/default
+  
+  if nginx -t 2>/dev/null; then
+    systemctl restart nginx
+    systemctl enable nginx
+    green "[*] Nginx 配置成功"
+  else
+    red "[!] Nginx 配置失败"
+    nginx -t
+  fi
+}
+
+write_config() {
+  PASS=$(openssl rand -base64 18 | tr -d "=+/" | cut -c1-24)
+  mkdir -p "$CLIENT_DIR"
+  chmod 700 "$CLIENT_DIR"
+
+  cat > "$CONFIG_DIR/config.yaml" <<SERVEREOF
+listen: :$PORT
+
+tls:
+  cert: $CONFIG_DIR/cert.crt
+  key: $CONFIG_DIR/private.key
+
+auth:
+  type: password
+  password: $PASS
+
+obfs:
+  type: salamander
+  salamander:
+    password: $SALAMANDER_KEY
+
+masquerade:
+  type: proxy
+  proxy:
+    url: http://127.0.0.1:80
+    rewriteHost: true
+
+quic:
+  initStreamReceiveWindow: 8388608
+  maxStreamReceiveWindow: 8388608
+  initConnReceiveWindow: 20971520
+  maxConnReceiveWindow: 20971520
+  maxIdleTimeout: 60s
+  keepAlivePeriod: 15s
+
+bandwidth:
+  up: 500 mbps
+  down: 500 mbps
+
+log:
+  level: warn
+  file: $LOG_FILE
+SERVEREOF
+
+  cat > "$CLIENT_DIR/client.yaml" <<CLIENTEOF
+server: $IP:$PORT
+auth: $PASS
+
+tls:
+  sni: $SNI_DOMAIN
+  insecure: $(if [[ "$USE_REAL_CERT" == "true" ]]; then echo "false"; else echo "true"; fi)
+
+obfs:
+  type: salamander
+  salamander:
+    password: $SALAMANDER_KEY
+
+quic:
+  initStreamReceiveWindow: 8388608
+  maxStreamReceiveWindow: 8388608
+  initConnReceiveWindow: 20971520
+  maxConnReceiveWindow: 20971520
+
+fastOpen: true
+
+socks5:
+  listen: 127.0.0.1:1080
+
+http:
+  listen: 127.0.0.1:1081
+
+bandwidth:
+  up: 100 mbps
+  down: 100 mbps
+CLIENTEOF
+
+  LINK="hysteria2://$PASS@$IP:$PORT/?insecure=$(if [[ "$USE_REAL_CERT" == "true" ]]; then echo "0"; else echo "1"; fi)&sni=$SNI_DOMAIN&obfs=salamander&obfs-password=$SALAMANDER_KEY#HY2-Stealth"
+  echo "$LINK" > "$CLIENT_DIR/link.txt"
+  echo "$SALAMANDER_KEY" > "$CLIENT_DIR/salamander_key.txt"
+  
+  chmod 600 "$CLIENT_DIR"/*
+  green "[*] 配置生成成功"
+}
+
+create_service() {
+  cat > /etc/systemd/system/hysteria2.service <<SERVICEEOF
+[Unit]
+Description=Hysteria2 Server
+After=network.target nginx.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/hysteria server -c $CONFIG_DIR/config.yaml
+Restart=always
+RestartSec=5
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+SERVICEEOF
+
+  systemctl daemon-reload
+  systemctl enable hysteria2
+  systemctl start hysteria2 || { red "[!] 启动失败"; journalctl -u hysteria2 -n 20; exit 1; }
+  sleep 2
+  systemctl is-active --quiet hysteria2 && green "[*] 服务运行正常" || red "[!] 服务异常"
+}
+
+configure_firewall() {
+  yellow "[*] 配置防火墙..."
+  if command -v ufw &> /dev/null; then
+    ufw --force reset
+    ufw default deny incoming
+    ufw default allow outgoing
+    ufw allow 22/tcp
+    ufw allow 80/tcp
+    ufw allow 443/tcp
+    ufw allow $PORT/udp
+    ufw --force enable
+  fi
+  
+  iptables -I INPUT -p udp --dport $PORT -j ACCEPT
+  iptables -I INPUT -p tcp --dport 80 -j ACCEPT
+  iptables -I INPUT -p tcp --dport 443 -j ACCEPT
+  iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+  green "[*] 防火墙配置完成"
+}
+
+optimize_system() {
+  yellow "[*] 优化系统..."
+  cat >> /etc/sysctl.conf <<SYSCTLEOF
+
+net.core.rmem_max = 33554432
+net.core.wmem_max = 33554432
+net.ipv4.tcp_congestion_control = bbr
+net.core.default_qdisc = fq
+net.ipv4.tcp_fastopen = 3
+fs.file-max = 1048576
+SYSCTLEOF
+  sysctl -p >/dev/null 2>&1
+  green "[*] 系统优化完成"
+}
+
+generate_usage_info() {
+  cat > "$CLIENT_DIR/usage.txt" <<USAGEEOF
+===============================================
+  Hysteria2 终极隐蔽版 配置信息
+===============================================
+
+【服务器】
+IP: $IP
+端口: $PORT
+密码: $PASS
+SNI: $SNI_DOMAIN
+Salamander: $SALAMANDER_KEY
+
+【文件】
+服务端: $CONFIG_DIR/config.yaml
+客户端: $CLIENT_DIR/client.yaml
+密钥: $CLIENT_DIR/salamander_key.txt
+
+【连接】
+$(cat "$CLIENT_DIR/link.txt")
+
+【客户端使用】
+hysteria -c client.yaml
+
+【服务管理】
+systemctl status/restart hysteria2
+journalctl -u hysteria2 -f
+
+【重要】
+⚠️ 客户端必须配置Salamander混淆
+⚠️ 密钥必须完全一致
+⚠️ 推荐官方客户端或Clash Meta
+
+生成时间: $(date '+%Y-%m-%d %H:%M:%S')
+===============================================
+USAGEEOF
+  chmod 600 "$CLIENT_DIR/usage.txt"
+}
+
+show_final_info() {
+  clear
+  green "=========================================="
+  green "  Hysteria2 终极隐蔽版安装完成"
+  green "  Salamander + 真实网站伪装"
+  green "=========================================="
+  echo ""
+  yellow "【服务器信息】"
+  echo "  IP: $IP"
+  echo "  端口: $PORT"
+  echo "  密码: $PASS"
+  echo "  SNI: $SNI_DOMAIN"
+  echo "  Salamander: $SALAMANDER_KEY"
+  echo ""
+  yellow "【配置文件】"
+  echo "  $CLIENT_DIR/client.yaml"
+  echo "  $CLIENT_DIR/link.txt"
+  echo ""
+  yellow "【连接链接】"
+  cat "$CLIENT_DIR/link.txt"
+  echo ""
+  if command -v qrencode &> /dev/null; then
+    qrencode -t ANSIUTF8 "$(cat "$CLIENT_DIR/link.txt")" 2>/dev/null
+    echo ""
+  fi
+  yellow "【伪装网站】"
+  echo "  https://$SNI_DOMAIN"
+  echo ""
+  green "详细说明: cat $CLIENT_DIR/usage.txt"
+  green "=========================================="
+}
+
+main() {
+  clear
+  green "=========================================="
+  green "  Hysteria2 终极隐蔽版安装脚本"
+  green "=========================================="
+  echo ""
+  read -p "按回车继续..." 
+  
+  install_deps
+  get_ip
+  generate_cert
+  set_port
+  install_hysteria
+  generate_salamander_key
+  deploy_fake_website
+  configure_nginx
+  write_config
+  create_service
+  configure_firewall
+  optimize_system
+  generate_usage_info
+  show_final_info
+  
+  echo ""
+  green "安装完成！"
+}
+
+main
