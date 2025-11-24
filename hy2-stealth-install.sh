@@ -28,9 +28,9 @@ install() {
 # 生成证书
 gen_cert() {
   mkdir -p /etc/hysteria
-  openssl req -x509 -nodes -newkey ec:<(openssl ecparam -name prime256v1) \
-    -keyout /etc/hysteria/server.key -out /etc/hysteria/server.crt \
-    -subj "/CN=bing.com" -days 36500 >/dev/null 2>&1
+  openssl ecparam -genkey -name prime256v1 -out /etc/hysteria/server.key
+  openssl req -new -x509 -days 36500 -key /etc/hysteria/server.key \
+    -out /etc/hysteria/server.crt -subj "/CN=bing.com"
 }
 
 # 选择端口
@@ -117,23 +117,37 @@ EOF
 
 # 配置系统（极简优化）
 optimize() {
-  # 开启转发
-  echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-  echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.conf
+  # 开启转发（去重检查）
+  if ! grep -q "net.ipv4.ip_forward=1" /etc/sysctl.conf; then
+    echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+  fi
+  if ! grep -q "net.ipv6.conf.all.forwarding=1" /etc/sysctl.conf; then
+    echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.conf
+  fi
   
   # BBR加速
-  echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-  echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+  if ! grep -q "net.core.default_qdisc=fq" /etc/sysctl.conf; then
+    echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+  fi
+  if ! grep -q "net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf; then
+    echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+  fi
   
   # 提升缓冲区
-  echo "net.core.rmem_max=33554432" >> /etc/sysctl.conf
-  echo "net.core.wmem_max=33554432" >> /etc/sysctl.conf
+  if ! grep -q "net.core.rmem_max" /etc/sysctl.conf; then
+    echo "net.core.rmem_max=33554432" >> /etc/sysctl.conf
+    echo "net.core.wmem_max=33554432" >> /etc/sysctl.conf
+  fi
   
   sysctl -p >/dev/null 2>&1
   
-  # 防火墙
-  iptables -I INPUT -p udp --dport $PORT -j ACCEPT
-  iptables -I FORWARD -j ACCEPT
+  # 防火墙（检查规则是否已存在）
+  if ! iptables -C INPUT -p udp --dport $PORT -j ACCEPT 2>/dev/null; then
+    iptables -I INPUT -p udp --dport $PORT -j ACCEPT
+  fi
+  if ! iptables -C FORWARD -j ACCEPT 2>/dev/null; then
+    iptables -I FORWARD -j ACCEPT
+  fi
 }
 
 # 主流程
