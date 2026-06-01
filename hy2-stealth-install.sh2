@@ -26,8 +26,7 @@ install_deps() {
 # ────────────────────────────────────────────
 install_xray() {
   yellow "安装 Xray-core..."
-  bash <(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh) \
-    @ install 2>&1 | tail -5
+  bash <(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh) install 2>&1 | tail -5
   [[ ! -f /usr/local/bin/xray ]] && red "Xray 安装失败，请检查网络" && exit 1
   green "Xray 安装成功: $(/usr/local/bin/xray version | head -1)"
 }
