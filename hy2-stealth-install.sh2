@@ -111,14 +111,17 @@ get_cert() {
   fi
 
   # 安装证书到指定目录
-  mkdir -p /etc/xray/cert
+  mkdir -p /usr/local/etc/xray/cert
   "$ACME" --install-cert -d "$DOMAIN" --ecc \
-    --cert-file    /etc/xray/cert/cert.crt \
-    --key-file     /etc/xray/cert/cert.key \
-    --fullchain-file /etc/xray/cert/fullchain.crt \
+    --cert-file    /usr/local/etc/xray/cert/cert.crt \
+    --key-file     /usr/local/etc/xray/cert/cert.key \
+    --fullchain-file /usr/local/etc/xray/cert/fullchain.crt \
     --reloadcmd "systemctl restart xray 2>/dev/null || true"
 
-  chmod 600 /etc/xray/cert/cert.key
+  # 644 让 nobody 用户可读，600 会导致 permission denied
+  chmod 644 /usr/local/etc/xray/cert/cert.key
+  chmod 644 /usr/local/etc/xray/cert/fullchain.crt
+  chmod 644 /usr/local/etc/xray/cert/cert.crt
   green "证书申请成功"
 }
 
@@ -127,9 +130,9 @@ get_cert() {
 # ────────────────────────────────────────────
 gen_xray_config() {
   yellow "生成 Xray 配置..."
-  mkdir -p /etc/xray
+  mkdir -p /usr/local/etc/xray
 
-  cat > /etc/xray/config.json <<EOF
+  cat > /usr/local/etc/xray/config.json <<EOF
 {
   "log": {
     "loglevel": "warning"
@@ -153,8 +156,8 @@ gen_xray_config() {
         "tlsSettings": {
           "certificates": [
             {
-              "certificateFile": "/etc/xray/cert/fullchain.crt",
-              "keyFile": "/etc/xray/cert/cert.key"
+              "certificateFile": "/usr/local/etc/xray/cert/fullchain.crt",
+              "keyFile": "/usr/local/etc/xray/cert/cert.key"
             }
           ]
         },
