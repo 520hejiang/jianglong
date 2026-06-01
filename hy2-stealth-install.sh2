@@ -311,7 +311,12 @@ gen_xray_config() {
       },
       {
         "type": "field",
-        "network": "tcp,udp",
+        "network": "udp",
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
+        "network": "tcp",
         "outboundTag": "warp"
       }
     ]
