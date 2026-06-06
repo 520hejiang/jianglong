@@ -34,10 +34,13 @@ install_hysteria() {
 # 随机可用端口
 # ────────────────────────────────────────────
 set_port() {
-  PORT=$((RANDOM % 50000 + 10000))
-  while ss -tuln | grep -q ":$PORT "; do
-    PORT=$((RANDOM % 50000 + 10000))
-  done
+  PORT=443
+
+  if ss -tuln | grep -q ":443 "; then
+    red "443端口已被占用"
+    exit 1
+  fi
+
   yellow "监听端口: $PORT"
 }
 
