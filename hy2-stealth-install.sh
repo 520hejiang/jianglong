@@ -35,12 +35,6 @@ install_hysteria() {
 # ────────────────────────────────────────────
 set_port() {
   PORT=443
-
-  if ss -tuln | grep -q ":443 "; then
-    red "443端口已被占用"
-    exit 1
-  fi
-
   yellow "监听端口: $PORT"
 }
 
