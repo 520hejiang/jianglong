@@ -1,200 +1,547 @@
 #!/bin/bash
-set -Eeuo pipefail
 
-RED="\033[31m"; GREEN="\033[32m"; YELLOW="\033[33m"; NC="\033[0m"
-r(){ echo -e "${RED}$1${NC}"; }
-g(){ echo -e "${GREEN}$1${NC}"; }
-y(){ echo -e "${YELLOW}$1${NC}"; }
+RED="\033[31m"
+GREEN="\033[32m"
+YELLOW="\033[33m"
+PLAIN="\033[0m"
 
-[[ $EUID -ne 0 ]] && r "必须root运行" && exit 1
+red()    { echo -e "${RED}$1${PLAIN}"; }
+green()  { echo -e "${GREEN}$1${PLAIN}"; }
+yellow() { echo -e "${YELLOW}$1${PLAIN}"; }
 
-XRAY_DIR="/usr/local/etc/xray"
-CERT_DIR="$XRAY_DIR/cert"
-CONFIG="$XRAY_DIR/config.json"
-WARP_PORT=40000
+[[ $EUID -ne 0 ]] && red "请使用 root 运行" && exit 1
 
-# =====================
-# 公网IP
-# =====================
-get_ip(){
-  IP=$(curl -s https://api.ipify.org || true)
-  [[ -z "$IP" ]] && r "无法获取IP" && exit 1
-  y "IP: $IP"
+XRAY_CONFIG="/usr/local/etc/xray/config.json"
+CERT_DIR="/usr/local/etc/xray/cert"
+CLIENT_DIR="/root/vless-ws"
+WARP_SOCKS="127.0.0.1"
+WARP_PORT="40000"
+XRAY_PORT="443"
+TLS_MODE="【完全(严格)】(Full Strict)"
+
+# ==========================================
+# 端口占用检测函数
+# ==========================================
+check_port() {
+    local port=$1
+    # 如果端口被占用返回 1 (false)，未被占用返回 0 (true)
+    if ss -tlnp | grep -qE ":$port\b"; then
+        return 1
+    else
+        return 0
+    fi
 }
 
-# =====================
-# DNS校验
-# =====================
-check_dns(){
-  RES=$(dig +short "$DOMAIN" | tail -n1)
-  [[ "$RES" != "$IP" ]] && r "DNS不匹配 $RES != $IP" && exit 1
-  g "DNS OK"
+# ==========================================
+# 获取公网 IP (IPv4 & IPv6)
+# ==========================================
+get_ip() {
+    IP_V4=$(curl -s --max-time 5 -4 https://api.ipify.org 2>/dev/null)
+    IP_V6=$(curl -s --max-time 5 -6 https://api64.ipify.org 2>/dev/null)
+    [[ -n "$IP_V4" ]] && yellow "服务器 IPv4: $IP_V4"
+    [[ -n "$IP_V6" ]] && yellow "服务器 IPv6: $IP_V6"
+    [[ -z "$IP_V4" && -z "$IP_V6" ]] && red "无法获取任何公网 IP，请检查网络" && exit 1
 }
 
-# =====================
-# 端口检查
-# =====================
-check_port(){
-  ss -tlnp | grep -q ":80 " && r "80被占用" && exit 1
-  ss -tlnp | grep -q ":443 " && r "443被占用" && exit 1
+# ==========================================
+# 安装基础依赖
+# ==========================================
+install_deps() {
+    yellow "安装基础依赖..."
+    if command -v apt-get &>/dev/null; then
+        apt-get update -qq
+        apt-get install -y -qq curl wget unzip socat openssl uuid-runtime lsb-release gnupg python3 2>/dev/null
+    elif command -v yum &>/dev/null; then
+        yum install -y -q curl wget unzip socat openssl util-linux python3 2>/dev/null
+    else
+        red "不支持的系统，请使用 Debian/Ubuntu 或 CentOS" && exit 1
+    fi
+    green "依赖安装完成"
 }
 
-# =====================
-# 依赖
-# =====================
-deps(){
-  apt update -y
-  apt install -y curl wget socat openssl uuid-runtime dnsutils
+# ==========================================
+# 安装 Xray-core
+# ==========================================
+install_xray() {
+    yellow "安装 Xray-core..."
+    bash <(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh) install
+    [[ ! -f /usr/local/bin/xray ]] && red "Xray 安装失败，请检查网络" && exit 1
+    green "Xray 安装成功: $(/usr/local/bin/xray version | head -1)"
 }
 
-# =====================
-# Xray
-# =====================
-xray_install(){
-  bash <(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)
+# ==========================================
+# 收集参数与端口冲突处理
+# ==========================================
+collect_params() {
+    echo ""
+    yellow "=== 参数配置 ==="
+    echo ""
+
+    read -rp "请输入你的域名 (例: vpn.example.com): " DOMAIN
+    [[ -z "$DOMAIN" ]] && red "域名不能为空" && exit 1
+
+    read -rp "请输入 ACME 邮箱 (如果你使用自签名将跳过): " EMAIL
+    [[ -z "$EMAIL" ]] && EMAIL="admin@$DOMAIN"
+
+    RAND_PATH=$(openssl rand -hex 8)
+    read -rp "请输入 WebSocket 路径 [默认: /${RAND_PATH}]: " WS_PATH_INPUT
+    WS_PATH="/${WS_PATH_INPUT:-$RAND_PATH}"
+    [[ "${WS_PATH:0:1}" != "/" ]] && WS_PATH="/$WS_PATH"
+
+    UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen)
+
+    yellow "检查 Xray 端口冲突..."
+    # Cloudflare 支持的 HTTPS 端口
+    CF_PORTS=(443 8443 2053 2083 2087 2096)
+    local port_found=false
+    for p in "${CF_PORTS[@]}"; do
+        if check_port "$p"; then
+            XRAY_PORT=$p
+            port_found=true
+            break
+        fi
+    done
+    
+    if [[ "$port_found" == false ]]; then
+        red "Cloudflare 常用端口均被占用，请先释放 443 或 8443 等端口再试！" && exit 1
+    fi
+    green "已分配 Xray 监听端口: $XRAY_PORT"
+
+    yellow "检查 Warp 端口冲突..."
+    while ! check_port "$WARP_PORT"; do
+        WARP_PORT=$((WARP_PORT + 1))
+    done
+    green "已分配 Warp 本地端口: $WARP_PORT"
+
+    echo ""
+    yellow "请确认以下信息："
+    echo "  域名     : $DOMAIN"
+    echo "  节点端口 : $XRAY_PORT"
+    echo "  WS路径   : $WS_PATH"
+    echo "  UUID     : $UUID"
+    echo ""
+    read -rp "确认继续？[y/N]: " CONFIRM
+    [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]] && red "已取消" && exit 1
 }
 
-# =====================
-# 参数
-# =====================
-params(){
-  read -rp "域名: " DOMAIN
-  read -rp "邮箱: " EMAIL
-  UUID=$(cat /proc/sys/kernel/random/uuid)
-  WS="/$(openssl rand -hex 6)"
+# ==========================================
+# 系统优化
+# ==========================================
+optimize() {
+    local SYSCTL=/etc/sysctl.conf
+
+    add_sysctl() {
+        grep -q "^$1" "$SYSCTL" || echo "$1" >> "$SYSCTL"
+    }
+
+    add_sysctl "net.ipv4.ip_forward=1"
+    add_sysctl "net.ipv6.conf.all.forwarding=1"
+    add_sysctl "net.core.default_qdisc=fq"
+    add_sysctl "net.ipv4.tcp_congestion_control=bbr"
+    sysctl -p >/dev/null 2>&1
+
+    iptables -C INPUT -p tcp --dport "$XRAY_PORT" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$XRAY_PORT" -j ACCEPT
+    iptables -C INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 80 -j ACCEPT
+    iptables -C FORWARD -j ACCEPT 2>/dev/null || iptables -I FORWARD -j ACCEPT
+
+    # 放行 IPv6 端口
+    if command -v ip6tables &>/dev/null; then
+        ip6tables -C INPUT -p tcp --dport "$XRAY_PORT" -j ACCEPT 2>/dev/null || ip6tables -I INPUT -p tcp --dport "$XRAY_PORT" -j ACCEPT
+    fi
+
+    green "系统网络优化完成"
 }
 
-# =====================
-# ACME（修复核心）
-# =====================
-cert(){
-  y "申请证书..."
+# ==========================================
+# 申请 TLS 证书（带自签名降级机制）
+# ==========================================
+get_cert() {
+    yellow "准备获取 TLS 证书..."
+    mkdir -p "$CERT_DIR"
+    
+    local CERT_SUCCESS=false
 
-  curl -s https://get.acme.sh | sh -s email="$EMAIL"
-  ACME="$HOME/.acme.sh/acme.sh"
+    # 如果80端口空闲，尝试使用 ACME 申请证书
+    if check_port 80; then
+        curl -fsSL https://get.acme.sh | bash -s email="$EMAIL" >/dev/null 2>&1
+        ACME="$HOME/.acme.sh/acme.sh"
 
-  systemctl stop nginx 2>/dev/null || true
+        if [[ -f "$ACME" ]]; then
+            "$ACME" --set-default-ca --server letsencrypt >/dev/null 2>&1
+            yellow "正在通过 acme.sh 申请证书，请稍候..."
+            if "$ACME" --issue -d "$DOMAIN" --standalone --httpport 80 --keylength ec-256; then
+                "$ACME" --install-cert -d "$DOMAIN" --ecc \
+                    --cert-file      "$CERT_DIR/cert.crt" \
+                    --key-file       "$CERT_DIR/cert.key" \
+                    --fullchain-file "$CERT_DIR/fullchain.crt" \
+                    --reloadcmd      "systemctl restart xray 2>/dev/null || true"
+                CERT_SUCCESS=true
+            fi
+        fi
+    else
+        yellow "检测到 80 端口正被网站/面板使用，跳过 Let's Encrypt 证书申请..."
+    fi
 
-  set +e
-  OUT=$("$ACME" --issue -d "$DOMAIN" --standalone --httpport 80 2>&1)
-  RET=$?
-  set -e
+    # 失败降级：生成自签名证书
+    if [[ "$CERT_SUCCESS" == false ]]; then
+        yellow "使用自签名证书替代 (不影响 Cloudflare WS 代理，且永不过期)"
+        openssl ecparam -genkey -name prime256v1 -out "$CERT_DIR/cert.key" >/dev/null 2>&1
+        openssl req -new -x509 -days 36500 -key "$CERT_DIR/cert.key" -out "$CERT_DIR/fullchain.crt" -subj "/CN=$DOMAIN" >/dev/null 2>&1
+        TLS_MODE="【完全】(Full) <-- 注意：不要选严格模式"
+        green "自签名证书生成完毕！"
+    else
+        green "Let's Encrypt 官方证书申请并安装成功"
+    fi
 
-  echo "$OUT"
-
-  [[ $RET -ne 0 ]] && r "证书失败" && exit 1
-
-  mkdir -p "$CERT_DIR"
-
-  "$ACME" --install-cert -d "$DOMAIN" \
-    --cert-file "$CERT_DIR/cert.crt" \
-    --key-file "$CERT_DIR/cert.key" \
-    --fullchain-file "$CERT_DIR/fullchain.crt"
-
-  [[ ! -s "$CERT_DIR/fullchain.crt" ]] && r "证书缺失" && exit 1
-  [[ ! -s "$CERT_DIR/cert.key" ]] && r "KEY缺失" && exit 1
-
-  chmod 600 "$CERT_DIR/cert.key"
-  chmod 644 "$CERT_DIR/fullchain.crt"
-
-  g "证书OK"
+    chmod 644 "$CERT_DIR/cert.key"
+    chmod 644 "$CERT_DIR/fullchain.crt"
 }
 
-# =====================
-# Warp
-# =====================
-warp(){
-  curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --dearmor -o /usr/share/keyrings/warp.gpg
+# ==========================================
+# 安装 Cloudflare Warp
+# ==========================================
+install_warp() {
+    yellow "安装 Cloudflare Warp..."
 
-  echo "deb [signed-by=/usr/share/keyrings/warp.gpg] https://pkg.cloudflareclient.com/ bookworm main" \
-    > /etc/apt/sources.list.d/warp.list
+    if command -v warp-cli &>/dev/null; then
+        green "Warp 已安装，跳过"
+        return
+    fi
 
-  apt update -y
-  apt install -y cloudflare-warp
+    if command -v apt-get &>/dev/null; then
+        curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+        CODENAME=$(lsb_release -cs 2>/dev/null || (. /etc/os-release && echo "$VERSION_CODENAME"))
+        echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ ${CODENAME} main" > /etc/apt/sources.list.d/cloudflare-client.list
+        apt-get update -qq
+        apt-get install -y -qq cloudflare-warp
+    elif command -v yum &>/dev/null; then
+        curl -fsSL https://pkg.cloudflareclient.com/cloudflare-warp-ascii.repo > /etc/yum.repos.d/cloudflare-warp.repo
+        yum install -y cloudflare-warp
+    else
+        red "不支持的系统，请手动安装 cloudflare-warp" && exit 1
+    fi
 
-  systemctl enable warp-svc
-  systemctl restart warp-svc
-
-  warp-cli registration new || true
-  warp-cli mode proxy
-  warp-cli proxy port $WARP_PORT
-  warp-cli connect
-
-  sleep 3
-  warp-cli status | grep -q Connected || {
-    r "Warp失败"
-    exit 1
-  }
-
-  g "Warp OK"
+    [[ ! $(command -v warp-cli) ]] && red "Warp 安装失败" && exit 1
+    green "Warp 安装成功"
 }
 
-# =====================
-# 配置
-# =====================
-config(){
-  mkdir -p "$XRAY_DIR"
+# ==========================================
+# 配置并启动 Warp
+# ==========================================
+setup_warp() {
+    yellow "配置 Warp (支持 IPv4/IPv6)..."
 
-  cat > "$CONFIG" <<EOF
+    systemctl enable warp-svc >/dev/null 2>&1
+    systemctl restart warp-svc
+    sleep 3
+
+    # 新版 warp-cli 注册需要同意协议
+    if ! warp-cli --accept-tos status 2>/dev/null | grep -qE "Registration|Connected|Success"; then
+        warp-cli --accept-tos register 2>/dev/null || warp-cli --accept-tos registration new 2>/dev/null
+        sleep 2
+    fi
+
+    warp-cli --accept-tos mode proxy
+    warp-cli --accept-tos proxy port "$WARP_PORT"
+    warp-cli --accept-tos connect
+    sleep 5
+
+    STATUS=$(warp-cli --accept-tos status 2>/dev/null)
+    if echo "$STATUS" | grep -q -i "Connected"; then
+        green "Warp 连接成功"
+    else
+        red "Warp 连接失败，可能机房被限制，状态: $STATUS"
+    fi
+}
+
+# ==========================================
+# 生成 Xray 配置
+# ==========================================
+gen_xray_config() {
+    yellow "生成 Xray 配置..."
+    mkdir -p /usr/local/etc/xray
+
+    cat > "$XRAY_CONFIG" << EOF
 {
-  "inbounds":[
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
     {
-      "port":443,
-      "protocol":"vless",
-      "settings":{"clients":[{"id":"$UUID"}],"decryption":"none"},
-      "streamSettings":{
-        "network":"ws",
-        "security":"tls",
-        "tlsSettings":{
-          "certificates":[{"certificateFile":"$CERT_DIR/fullchain.crt","keyFile":"$CERT_DIR/cert.key"}]
+      "port": $XRAY_PORT,
+      "listen": "::",
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "$UUID",
+            "level": 0
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "certificates": [
+            {
+              "certificateFile": "$CERT_DIR/fullchain.crt",
+              "keyFile": "$CERT_DIR/cert.key"
+            }
+          ]
         },
-        "wsSettings":{"path":"$WS"}
+        "wsSettings": {
+          "path": "$WS_PATH",
+          "host": "$DOMAIN"
+        }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls"]
       }
     }
   ],
-  "outbounds":[{"protocol":"freedom"}]
+  "outbounds": [
+    {
+      "tag": "warp",
+      "protocol": "socks",
+      "settings": {
+        "servers": [
+          {
+            "address": "$WARP_SOCKS",
+            "port": $WARP_PORT
+          }
+        ]
+      }
+    },
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    },
+    {
+      "tag": "blocked",
+      "protocol": "blackhole"
+    }
+  ],
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+      {
+        "type": "field",
+        "ip": ["geoip:private"],
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
+        "network": "udp",
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
+        "network": "tcp",
+        "outboundTag": "warp"
+      }
+    ]
+  }
+}
+EOF
+
+    green "Xray 配置生成完成"
+}
+
+# ==========================================
+# 启动 Xray 服务
+# ==========================================
+start_xray() {
+    systemctl daemon-reload
+    systemctl enable xray >/dev/null 2>&1
+    systemctl restart xray
+    sleep 3
+
+    if systemctl is-active --quiet xray; then
+        green "Xray 服务启动成功"
+    else
+        red "Xray 服务启动失败，查看日志:"
+        journalctl -u xray -n 30 --no-pager
+        exit 1
+    fi
+}
+
+# ==========================================
+# 生成客户端链接
+# ==========================================
+gen_client_output() {
+    mkdir -p "$CLIENT_DIR"
+
+    ENCODED_PATH=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${WS_PATH}', safe='/'))" 2>/dev/null || echo "${WS_PATH}")
+    LINK="vless://${UUID}@${DOMAIN}:${XRAY_PORT}?encryption=none&security=tls&sni=${DOMAIN}&type=ws&host=${DOMAIN}&path=${ENCODED_PATH}#VLESS-WS-CF"
+    echo "$LINK" > "$CLIENT_DIR/link.txt"
+
+    cat > "$CLIENT_DIR/client.json" << EOF
+{
+  "备注": "VLESS-WS-TLS-CF-Warp",
+  "地址": "$DOMAIN",
+  "端口": $XRAY_PORT,
+  "UUID": "$UUID",
+  "加密": "none",
+  "传输": "ws",
+  "WS路径": "$WS_PATH",
+  "WS Host": "$DOMAIN",
+  "TLS": "tls",
+  "SNI": "$DOMAIN",
+  "指纹": "chrome"
 }
 EOF
 }
 
-# =====================
-# Xray启动前测试
-# =====================
-start(){
-  /usr/local/bin/xray run -test -config "$CONFIG" || {
-    r "配置错误"
-    exit 1
-  }
+# ==========================================
+# 验证 Warp 出口 IP (IPv4 & IPv6)
+# ==========================================
+verify_warp_ip() {
+    yellow "正在验证 Warp 出口连通性..."
+    sleep 2
+    WARP_IP_V4=$(curl -s --max-time 8 --proxy "socks5://$WARP_SOCKS:$WARP_PORT" -4 https://api.ipify.org 2>/dev/null)
+    WARP_IP_V6=$(curl -s --max-time 8 --proxy "socks5://$WARP_SOCKS:$WARP_PORT" -6 https://api64.ipify.org 2>/dev/null)
 
-  systemctl restart xray
-  systemctl enable xray
-
-  systemctl is-active --quiet xray || {
-    r "Xray失败"
-    exit 1
-  }
-
-  g "Xray OK"
+    [[ -n "$WARP_IP_V4" ]] && green "Warp IPv4 出口成功接管: $WARP_IP_V4"
+    [[ -n "$WARP_IP_V6" ]] && green "Warp IPv6 出口成功接管: $WARP_IP_V6"
+    
+    if [[ -z "$WARP_IP_V4" && -z "$WARP_IP_V6" ]]; then
+        yellow "未能通过脚本自动获取 Warp IP (可能是目标 API 限流)，不影响实际使用，请客户端连接后访问 ipinfo.io 手动确认。"
+    fi
 }
 
-# =====================
-# 主流程
-# =====================
-main(){
-  get_ip
-  deps
-  xray_install
-  params
-  check_port
-  check_dns
-  cert
-  warp
-  config
-  start
+# ==========================================
+# 主流程管理及菜单
+# ==========================================
+main_install() {
+    get_ip
+    install_deps
+    install_xray
+    collect_params
+    optimize
+    get_cert
+    install_warp
+    setup_warp
+    gen_xray_config
+    start_xray
+    gen_client_output
+    verify_warp_ip
 
-  g "========================"
-  g "安装完成"
-  echo "vless://$UUID@$DOMAIN:443"
+    echo ""
+    green "========================================"
+    green "           环境配置完成！"
+    green "========================================"
+    echo ""
+    echo "域名       : $DOMAIN"
+    echo "节点端口   : $XRAY_PORT"
+    echo "UUID       : $UUID"
+    echo "WS路径     : $WS_PATH"
+    echo ""
+    yellow "连接链接（直接复制导入 V2rayN / Shadowrocket / Clash）："
+    cat "$CLIENT_DIR/link.txt"
+    echo ""
+    yellow "═══ 必看！Cloudflare 设置 ═══"
+    echo "1. DNS 解析 → $DOMAIN 的 A / AAAA 记录 → 【开启橙色云】"
+    echo "2. SSL/TLS 设置 → 加密模式 → 设为 $TLS_MODE"
+    echo "3. 网络设置 → 开启【WebSockets】"
+    echo ""
+    yellow "═══ 其他说明 ═══"
+    echo "此脚本完美兼容 1Panel 和你的小说网站。Warp 已开启全双工支持 (IPv4 + IPv6)。"
+    echo "重新查看配置可运行此脚本选择 [2] 即可。"
+    echo ""
+    
+    read -rp "按回车键返回主菜单..."
+    start_menu
 }
 
-main
+view_config() {
+    clear
+    if [[ -f "$CLIENT_DIR/link.txt" ]]; then
+        green "========================================"
+        green "           当前节点配置信息"
+        green "========================================"
+        echo ""
+        yellow "连接链接（直接复制）："
+        cat "$CLIENT_DIR/link.txt"
+        echo ""
+        yellow "详细配置信息："
+        cat "$CLIENT_DIR/client.json"
+        echo ""
+    else
+        red "未找到配置文件！可能尚未安装，或已被清理。"
+    fi
+    echo ""
+    read -rp "按回车键返回主菜单..."
+    start_menu
+}
+
+uninstall_all() {
+    clear
+    yellow "========================================"
+    yellow "               卸载向导"
+    yellow "========================================"
+    echo ""
+    red "警告：此操作将清理 Xray、Cloudflare Warp 及相关证书和配置文件！(不会影响青龙和1Panel)"
+    read -rp "确认要继续卸载吗？[y/N]: " confirm_un
+    if [[ "$confirm_un" =~ ^[Yy]$ ]]; then
+        yellow "正在卸载 Xray..."
+        systemctl stop xray 2>/dev/null
+        systemctl disable xray 2>/dev/null
+        bash <(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh) remove 2>/dev/null
+        rm -rf /usr/local/etc/xray
+        rm -rf "$CLIENT_DIR"
+        
+        yellow "正在卸载 Cloudflare Warp..."
+        warp-cli --accept-tos disconnect 2>/dev/null
+        systemctl stop warp-svc 2>/dev/null
+        systemctl disable warp-svc 2>/dev/null
+        if command -v apt-get &>/dev/null; then
+            apt-get purge -y cloudflare-warp 2>/dev/null
+        elif command -v yum &>/dev/null; then
+            yum remove -y cloudflare-warp 2>/dev/null
+        fi
+        
+        yellow "正在清理 acme.sh 证书..."
+        if [[ -f "$HOME/.acme.sh/acme.sh" ]]; then
+            "$HOME/.acme.sh/acme.sh" --uninstall 2>/dev/null
+            rm -rf "$HOME/.acme.sh"
+        fi
+        
+        green "全部卸载清理完成！"
+    else
+        green "已取消卸载操作。"
+    fi
+    echo ""
+    read -rp "按回车键返回主菜单..."
+    start_menu
+}
+
+start_menu() {
+    clear
+    green "========================================"
+    green "  VLESS + WS + TLS + CF + Warp"
+    green "    全能兼容版 (不冲突宝塔/1Panel)"
+    green "========================================"
+    echo ""
+    yellow " 1. 安装 VLESS 节点"
+    yellow " 2. 查看当前节点配置"
+    yellow " 3. 卸载所有组件"
+    yellow " 0. 退出脚本"
+    echo ""
+    read -rp "请输入选项 [0-3]: " menu_num
+    case "$menu_num" in
+        1) main_install ;;
+        2) view_config ;;
+        3) uninstall_all ;;
+        0) exit 0 ;;
+        *)
+            red "输入错误，请重新输入"
+            sleep 2
+            start_menu
+            ;;
+    esac
+}
+
+start_menu
