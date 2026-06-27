@@ -193,8 +193,14 @@ get_cert() {
         green "Let's Encrypt 官方证书申请并安装成功"
     fi
 
-    chmod 644 "$CERT_DIR/cert.key"
+    # 私钥权限收紧为 600 (原 644 会让私钥全局可读)；
+    # Xray 官方服务默认以 nobody 运行，将私钥属主改为该用户以保证可读取
+    local XRAY_USER
+    XRAY_USER=$(awk -F= '/^User=/{print $2}' /etc/systemd/system/xray.service 2>/dev/null | head -1)
+    XRAY_USER=${XRAY_USER:-nobody}
+    chmod 600 "$CERT_DIR/cert.key"
     chmod 644 "$CERT_DIR/fullchain.crt"
+    id "$XRAY_USER" >/dev/null 2>&1 && chown "$XRAY_USER" "$CERT_DIR/cert.key" 2>/dev/null
 }
 
 # ==========================================
@@ -211,6 +217,12 @@ install_warp() {
     if command -v apt-get &>/dev/null; then
         curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
         CODENAME=$(lsb_release -cs 2>/dev/null || (. /etc/os-release && echo "$VERSION_CODENAME"))
+        # Cloudflare 官方仓库仅支持有限的发行版代号，未在列表内时回退到最接近的稳定版
+        local SUPPORTED=" bullseye bookworm bionic focal jammy noble "
+        if [[ "$SUPPORTED" != *" $CODENAME "* ]]; then
+            yellow "系统代号 '$CODENAME' 不在 Cloudflare 官方支持列表，回退使用 bookworm 源..."
+            CODENAME="bookworm"
+        fi
         echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ ${CODENAME} main" > /etc/apt/sources.list.d/cloudflare-client.list
         apt-get update -qq
         apt-get install -y -qq cloudflare-warp
@@ -229,28 +241,52 @@ install_warp() {
 # 配置并启动 Warp
 # ==========================================
 setup_warp() {
-    yellow "配置 Warp (支持 IPv4/IPv6)..."
+    yellow "配置 Warp (Proxy 模式, 支持 IPv4/IPv6)..."
 
     systemctl enable warp-svc >/dev/null 2>&1
     systemctl restart warp-svc
-    sleep 3
 
-    # 新版 warp-cli 注册需要同意协议
-    if ! warp-cli --accept-tos status 2>/dev/null | grep -qE "Registration|Connected|Success"; then
-        warp-cli --accept-tos register 2>/dev/null || warp-cli --accept-tos registration new 2>/dev/null
+    # 等待 warp-svc 守护进程就绪 (最多 30 秒)，避免固定 sleep 造成的 "daemon 未就绪" 报错
+    local i=0
+    until warp-cli --accept-tos status >/dev/null 2>&1; do
+        sleep 1
+        i=$((i + 1))
+        if [[ $i -ge 30 ]]; then
+            red "warp-svc 守护进程启动超时，请手动检查: systemctl status warp-svc"
+            return 1
+        fi
+    done
+
+    # 注册账户 (仅在尚未注册时执行；registration show 是新版命令，register 为旧版回退)
+    if ! warp-cli --accept-tos registration show >/dev/null 2>&1; then
+        yellow "正在注册 Warp 账户..."
+        warp-cli --accept-tos registration new >/dev/null 2>&1 \
+            || warp-cli --accept-tos register >/dev/null 2>&1
         sleep 2
     fi
 
-    warp-cli --accept-tos mode proxy
-    warp-cli --accept-tos proxy port "$WARP_PORT"
-    warp-cli --accept-tos connect
-    sleep 5
+    # 切换为 SOCKS 代理模式并指定本地端口 (必须在 connect 之前设置)
+    warp-cli --accept-tos mode proxy >/dev/null 2>&1
+    warp-cli --accept-tos proxy port "$WARP_PORT" >/dev/null 2>&1
 
-    STATUS=$(warp-cli --accept-tos status 2>/dev/null)
-    if echo "$STATUS" | grep -q -i "Connected"; then
-        green "Warp 连接成功"
+    # 连接 (带重试，机房首次握手偶尔失败)
+    local connected=false
+    for i in 1 2 3; do
+        warp-cli --accept-tos connect >/dev/null 2>&1
+        sleep 4
+        if warp-cli --accept-tos status 2>/dev/null | grep -qi "Connected"; then
+            connected=true
+            break
+        fi
+        yellow "Warp 第 $i 次连接尝试未成功，重试中..."
+    done
+
+    if [[ "$connected" == true ]]; then
+        green "Warp 连接成功 (本地 SOCKS5: $WARP_SOCKS:$WARP_PORT)"
     else
-        red "Warp 连接失败，可能机房被限制，状态: $STATUS"
+        red "Warp 连接失败，可能该机房 IP 段被 Cloudflare 限制。"
+        red "当前状态: $(warp-cli --accept-tos status 2>/dev/null | tr '\n' ' ')"
+        yellow "Xray 仍会继续安装；如需排查可手动执行: warp-cli connect"
     fi
 }
 
@@ -264,7 +300,8 @@ gen_xray_config() {
     cat > "$XRAY_CONFIG" << EOF
 {
   "log": {
-    "loglevel": "warning"
+    "loglevel": "warning",
+    "access": "none"
   },
   "inbounds": [
     {
@@ -298,7 +335,7 @@ gen_xray_config() {
       },
       "sniffing": {
         "enabled": true,
-        "destOverride": ["http", "tls"]
+        "destOverride": ["http", "tls", "quic"]
       }
     }
   ],
@@ -329,8 +366,13 @@ gen_xray_config() {
     "rules": [
       {
         "type": "field",
+        "protocol": ["bittorrent"],
+        "outboundTag": "blocked"
+      },
+      {
+        "type": "field",
         "ip": ["geoip:private"],
-        "outboundTag": "direct"
+        "outboundTag": "blocked"
       },
       {
         "type": "field",
@@ -346,6 +388,13 @@ gen_xray_config() {
   }
 }
 EOF
+
+    # 收紧配置文件权限 (含 UUID 等敏感信息)，并交由 Xray 运行用户读取
+    local XRAY_USER
+    XRAY_USER=$(awk -F= '/^User=/{print $2}' /etc/systemd/system/xray.service 2>/dev/null | head -1)
+    XRAY_USER=${XRAY_USER:-nobody}
+    chmod 600 "$XRAY_CONFIG"
+    id "$XRAY_USER" >/dev/null 2>&1 && chown "$XRAY_USER" "$XRAY_CONFIG" 2>/dev/null
 
     green "Xray 配置生成完成"
 }
@@ -401,8 +450,10 @@ EOF
 verify_warp_ip() {
     yellow "正在验证 Warp 出口连通性..."
     sleep 2
-    WARP_IP_V4=$(curl -s --max-time 8 --proxy "socks5://$WARP_SOCKS:$WARP_PORT" -4 https://api.ipify.org 2>/dev/null)
-    WARP_IP_V6=$(curl -s --max-time 8 --proxy "socks5://$WARP_SOCKS:$WARP_PORT" -6 https://api64.ipify.org 2>/dev/null)
+    # 使用 socks5h 让 Warp 代理负责 DNS 解析；不要用 -4/-6 强制本机到 127.0.0.1 代理的连接族，
+    # 通过仅 A 记录 / 仅 AAAA 记录的探测域名分别测试 IPv4 / IPv6 出口
+    WARP_IP_V4=$(curl -s --max-time 8 --proxy "socks5h://$WARP_SOCKS:$WARP_PORT" https://api.ipify.org 2>/dev/null)
+    WARP_IP_V6=$(curl -s --max-time 8 --proxy "socks5h://$WARP_SOCKS:$WARP_PORT" https://api6.ipify.org 2>/dev/null)
 
     [[ -n "$WARP_IP_V4" ]] && green "Warp IPv4 出口成功接管: $WARP_IP_V4"
     [[ -n "$WARP_IP_V6" ]] && green "Warp IPv6 出口成功接管: $WARP_IP_V6"
