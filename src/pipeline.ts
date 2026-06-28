@@ -262,6 +262,7 @@ export async function advanceBook(env: Env, bookId: string, budgetMs = 18000): P
     if (!st || !st.stage) {
       st = { chapterNo: book.next_chapter, version: 1, stage: "extract", attempt: 0 };
       await M.setPlot(env, bookId, GENJOB_KEY, st);
+      await M.log(env, { bookId, chapterNo: st.chapterNo, stage: "start", message: `▶ 开始生成第${st.chapterNo}章` });
     }
     while (st.stage !== "complete" && Date.now() - start < budgetMs) {
       st = await runStep(env, bookId, st);

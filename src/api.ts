@@ -107,7 +107,8 @@ export async function api(req: Request, env: Env, ctx: ExecutionContext): Promis
       const id = mReset[1];
       await env.DB.prepare("DELETE FROM plot_state WHERE book_id=? AND key IN ('__genjob','__rewritejob')").bind(id).run();
       await env.KV.delete(`genlock:${id}`);
-      await env.DB.prepare("UPDATE books SET last_error=NULL, updated_at=? WHERE id=?").bind(now(), id).run();
+      // 重置=彻底恢复：清存档/锁，并把书设回 running，否则 cron 不会推进
+      await env.DB.prepare("UPDATE books SET status='running', last_error=NULL, updated_at=? WHERE id=?").bind(now(), id).run();
       await env.DB.prepare("INSERT INTO logs (id,book_id,level,stage,message,meta,created_at) VALUES (?,?,?,?,?,?,?)")
         .bind(uid(), id, "warn", "manual", "手动重置生成（清掉卡住的存档与锁）", null, now()).run();
       ctx.waitUntil(advanceBook(env, id, 18000).catch(() => {}));
@@ -125,9 +126,10 @@ export async function api(req: Request, env: Env, ctx: ExecutionContext): Promis
         ctx.waitUntil(advanceBook(env, id, 18000).catch(() => {}));
         return json({ ok: true, rewriting: body.chapter, version: v, note: "重写已排期，后台逐步生成，约数分钟后刷新该章即可看到新版" });
       }
-      // 向前生成：断点续传推进，后台继续，立即返回
+      // 向前生成：点"立即生成"即视为要它跑，顺手设为 running（否则 cron 不推进）
       const b = await env.DB.prepare("SELECT next_chapter FROM books WHERE id=?").bind(id).first<{ next_chapter: number }>();
       if (!b) return err("not found", 404);
+      await env.DB.prepare("UPDATE books SET status='running', last_error=NULL, updated_at=? WHERE id=?").bind(now(), id).run();
       ctx.waitUntil(advanceBook(env, id, 18000).catch(() => {}));
       return json({ ok: true, generating: b.next_chapter, note: "已开始，章节会在后台逐步生成，约数分钟内出章" });
     }
