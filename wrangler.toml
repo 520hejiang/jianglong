@@ -48,21 +48,3 @@ MAX_CONTEXT_TOKENS = "60000"   # 按官方最大上下文留余量，可在 dash
 #   wrangler secret put TELEGRAM_BOT_TOKEN
 #   wrangler secret put TELEGRAM_CHAT_ID
 #   wrangler secret put ADMIN_TOKEN        # 控制台登录口令
-
-{
-  "observability": {
-    "enabled": false,
-    "head_sampling_rate": 1,
-    "logs": {
-      "enabled": true,
-      "head_sampling_rate": 1,
-      "persist": true,
-      "invocation_logs": true
-    },
-    "traces": {
-      "enabled": false,
-      "persist": true,
-      "head_sampling_rate": 1
-    }
-  }
-}
