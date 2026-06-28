@@ -183,15 +183,15 @@ export async function log(env: Env, p: { bookId?: string; chapterNo?: number; le
 }
 
 // ---------------- 并发锁（KV）：同一本书同一时刻只跑一章 ----------------
-export async function acquireLock(env: Env, bookId: string, ttlSec = 300): Promise<boolean> {
-  const key = `lock:${bookId}`;
+export async function acquireLock(env: Env, bookId: string, ttlSec = 120): Promise<boolean> {
+  const key = `genlock:${bookId}`; // 新前缀：忽略旧版可能残留的长 TTL 锁
   const cur = await env.KV.get(key);
   if (cur) return false;
-  await env.KV.put(key, String(now()), { expirationTtl: ttlSec });
+  await env.KV.put(key, String(now()), { expirationTtl: Math.max(60, ttlSec) });
   return true;
 }
 export async function releaseLock(env: Env, bookId: string) {
-  await env.KV.delete(`lock:${bookId}`);
+  await env.KV.delete(`genlock:${bookId}`);
 }
 
 // ---------------- 上下文编译：把世界状态压成喂给 LLM 的紧凑文本 ----------------

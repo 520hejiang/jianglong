@@ -9,7 +9,8 @@ import type { Env, GenJob } from "./types";
 import * as M from "./memory";
 import { tg } from "./telegram";
 import { api } from "./api";
-import { dispatchChapter, runChapterJob } from "./jobs";
+import { runChapterJob } from "./jobs";
+import { advanceBook } from "./pipeline";
 
 export default {
   // ---------------- HTTP ----------------
@@ -35,20 +36,20 @@ export default {
   },
 };
 
-// 巡检：给每本 running 的书推进"下一章"，并做每日报告
+// 巡检：给每本 running 的书"断点续传"推进生成，并做每日报告。
+// 免费计划下，单次调用可能被平台掐断；advanceBook 每步存档，故多次巡检接力即可完成整章。
 async function cronTick(env: Env, ctx: ExecutionContext): Promise<void> {
   const books = await M.listRunningBooks(env);
   for (const b of books) {
-    // 已写到目标章数则停
     if (b.target_chapters && b.next_chapter > b.target_chapters) {
       await M.setBookStatus(env, b.id, "finished");
       await tg(env, `✅ <b>${b.title}</b> 已达成目标 ${b.target_chapters} 章，自动停笔。`);
       continue;
     }
-    // 该书若有锁说明正在生成，跳过（避免堆积）
-    const locked = await env.KV.get(`lock:${b.id}`);
-    if (locked) continue;
-    await dispatchChapter(env, ctx, { bookId: b.id, chapterNo: b.next_chapter, reason: "cron" });
+    // advanceBook 自带锁与时间预算；被锁(正在生成)会直接返回 idle
+    ctx.waitUntil(advanceBook(env, b.id, 18000).catch(async (e) => {
+      await M.log(env, { bookId: b.id, level: "error", stage: "cron", message: String(e) });
+    }));
   }
   await maybeDailyReport(env, books.length);
 }
