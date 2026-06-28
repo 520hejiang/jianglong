@@ -100,6 +100,30 @@ export async function api(req: Request, env: Env, ctx: ExecutionContext): Promis
       const r = await env.DB.prepare("SELECT * FROM characters WHERE book_id=? ORDER BY role, name").bind(mChars[1]).all();
       return json(r.results ?? []);
     }
+    // 批量 seed 角色/法宝设定（解析脚本 & 新书向导用）。按 name upsert。
+    if (mChars && req.method === "POST") {
+      const bookId = mChars[1];
+      const body = await req.json<any>();
+      const list: any[] = Array.isArray(body) ? body : (body.characters || []);
+      for (const c of list) {
+        if (!c?.name) continue;
+        await env.DB.prepare(
+          `INSERT INTO characters (id,book_id,name,aliases,role,alive,realm_index,realm_name,realm_sub,
+           techniques,artifacts,relations,status_notes,last_seen_ch,updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)
+           ON CONFLICT(book_id,name) DO UPDATE SET aliases=excluded.aliases, role=excluded.role,
+             alive=excluded.alive, realm_index=excluded.realm_index, realm_name=excluded.realm_name,
+             realm_sub=excluded.realm_sub, techniques=excluded.techniques, artifacts=excluded.artifacts,
+             relations=excluded.relations, status_notes=excluded.status_notes, updated_at=excluded.updated_at`
+        ).bind(
+          uid(), bookId, c.name, JSON.stringify(c.aliases ?? []), c.role ?? "npc",
+          c.alive === false ? 0 : 1, c.realm_index ?? 0, c.realm_name ?? "", c.realm_sub ?? 0,
+          JSON.stringify(c.techniques ?? []), JSON.stringify(c.artifacts ?? []),
+          JSON.stringify(c.relations ?? []), c.status_notes ?? "", now()
+        ).run();
+      }
+      return json({ ok: true, count: list.length });
+    }
     const mChar = p.match(/^\/api\/characters\/([^/]+)$/);
     if (mChar && req.method === "PUT") {
       // 手动改角色（生死/境界等，用于防崩）

@@ -29,22 +29,80 @@
     <section id="tab-books" class="tab active">
       <div class="row">
         <button onclick="loadBooks()">刷新</button>
-        <button onclick="showNewBook()">+ 新建书 / 导入大纲</button>
+        <button onclick="openWizard()">🧙 新书向导</button>
       </div>
       <div id="bookList"></div>
 
-      <dialog id="newBookDlg">
-        <h3>新建书 · 导入大纲与设定</h3>
-        <label>书名 <input id="nb_title" /></label>
-        <label>起始章 <input id="nb_start" type="number" value="1" /></label>
-        <label>目标章数 <input id="nb_target" type="number" value="800" /></label>
-        <label>总纲<textarea id="nb_master" rows="4" placeholder="整本书的总纲"></textarea></label>
-        <label>核心设定集<textarea id="nb_settings" rows="4" placeholder="世界观/势力/地理/历法/境界体系说明"></textarea></label>
-        <label>境界体系 power_system (JSON)<textarea id="nb_power" rows="3" placeholder='留空则用默认凡人流境界'></textarea></label>
-        <label>分卷大纲 volume_outline (JSON 数组)<textarea id="nb_vol" rows="6" placeholder='[{"vol":1,"title":"山村少年","start_ch":1,"end_ch":60,"summary":"...","key_events":["..."]}]'></textarea></label>
-        <div class="row">
-          <button onclick="createBook()">创建</button>
-          <button onclick="newBookDlg.close()">取消</button>
+      <!-- ===================== 新书向导 ===================== -->
+      <dialog id="wizard">
+        <div class="wiz-head">
+          <h3 id="wizTitle">新书向导</h3>
+          <div class="wiz-steps" id="wizSteps"></div>
+        </div>
+
+        <!-- Step 1 基础 + 文风 -->
+        <div class="wiz-step" data-step="0">
+          <p class="hint">先填基础信息，并选择文风。文风会作为最高优先级要求注入每一步生成。</p>
+          <label>书名 <input id="w_title" placeholder="如：凡尘问道" /></label>
+          <div class="row">
+            <label style="flex:1">起始章 <input id="w_start" type="number" value="1" /></label>
+            <label style="flex:1">目标章数 <input id="w_target" type="number" value="800" /></label>
+          </div>
+          <label>文风预设
+            <select id="w_stylePreset" onchange="onStylePreset()">
+              <option value="fanren">凡人修仙传（硬核·谨慎·战力严谨）默认</option>
+              <option value="custom">自定义</option>
+            </select>
+          </label>
+          <label>自定义文风（仅自定义时生效，留空用默认铁律）
+            <textarea id="w_style" rows="4" placeholder="例如：偏诡秘/克苏鲁向修仙，主角更冷酷……"></textarea>
+          </label>
+        </div>
+
+        <!-- Step 2 总纲 + 核心设定（支持解析JSON一键导入） -->
+        <div class="wiz-step" data-step="1" hidden>
+          <div class="row">
+            <span class="hint">可粘贴 parse_outline.py 的 JSON 输出，一键填充全部步骤 →</span>
+            <button onclick="importParsed()">导入解析JSON</button>
+          </div>
+          <textarea id="w_import" rows="2" placeholder='把 parse_outline.py 生成的 JSON 粘进来再点「导入解析JSON」' style="display:none"></textarea>
+          <label>总纲<textarea id="w_master" rows="5" placeholder="整本书主线梗概"></textarea></label>
+          <label>核心设定集<textarea id="w_settings" rows="6" placeholder="世界观/势力/地理/历法/关键物品说明"></textarea></label>
+        </div>
+
+        <!-- Step 3 境界体系 -->
+        <div class="wiz-step" data-step="2" hidden>
+          <p class="hint">境界由低到高，序号即战力等级（校验器据此防跨境界）。默认凡人流，可增删改。</p>
+          <div id="w_ranks"></div>
+          <button onclick="addRank()">+ 添加境界</button>
+        </div>
+
+        <!-- Step 4 分卷大纲 -->
+        <div class="wiz-step" data-step="3" hidden>
+          <p class="hint">系统据此自动把卷拆成单章。每卷给定章号范围、简介与关键事件。</p>
+          <div id="w_vols"></div>
+          <button onclick="addVol()">+ 添加一卷</button>
+        </div>
+
+        <!-- Step 5 核心人物/法宝 -->
+        <div class="wiz-step" data-step="4" hidden>
+          <p class="hint">预置主角与关键角色的初始境界/法宝，越准越防崩。</p>
+          <div id="w_chars"></div>
+          <button onclick="addChar()">+ 添加角色</button>
+        </div>
+
+        <!-- Step 6 确认 -->
+        <div class="wiz-step" data-step="5" hidden>
+          <p class="hint">确认无误后创建。创建后默认「暂停」，回书架点「开始」即全自动连续生成。</p>
+          <pre id="w_preview" style="max-height:40vh;overflow:auto"></pre>
+        </div>
+
+        <div class="wiz-foot">
+          <button id="wizPrev" onclick="wizGo(-1)">上一步</button>
+          <span style="flex:1"></span>
+          <button onclick="document.getElementById('wizard').close()">取消</button>
+          <button id="wizNext" onclick="wizGo(1)">下一步</button>
+          <button id="wizDone" onclick="wizCreate()" style="display:none;background:#16a34a">✅ 创建本书</button>
         </div>
       </dialog>
     </section>

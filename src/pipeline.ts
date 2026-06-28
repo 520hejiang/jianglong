@@ -36,6 +36,11 @@ export async function generateChapter(env: Env, bookId: string, chapterNo: numbe
   const vol = M.volumeForChapter(book, chapterNo);
   const volText = vol ? JSON.stringify(vol) : (book.master_outline || "（无卷纲，依据总纲推进）");
 
+  // 本书自定义文风（向导/控制台可设），优先级最高，叠加在通用铁律之上
+  const stylePrefix = book.style_prompt_override
+    ? `【本书特别文风/设定要求（优先级最高，与下列通用铁律冲突时以此为准）】\n${book.style_prompt_override}\n\n`
+    : "";
+
   // ---------- 0. 读取记忆，编译上下文 ----------
   const chars = await M.loadCharacters(env, bookId);
   const fores = await M.openForeshadowing(env, bookId);
@@ -52,7 +57,7 @@ export async function generateChapter(env: Env, bookId: string, chapterNo: numbe
   });
 
   const extractRaw = await chat(env, [
-    { role: "system", content: fill(await tpl(env, bookId, "extract", PROMPT_EXTRACT), { CH: chapterNo }) },
+    { role: "system", content: stylePrefix + fill(await tpl(env, bookId, "extract", PROMPT_EXTRACT), { CH: chapterNo }) },
     { role: "user", content: fill("【本卷大纲】\n{{VOLUME}}\n\n【当前世界状态】\n{{MEMORY}}", { VOLUME: volText, MEMORY: baseMemoryNoRetrieval }) },
   ], { temperature: 0.4, maxTokens: 800, json: true });
 
@@ -68,7 +73,7 @@ export async function generateChapter(env: Env, bookId: string, chapterNo: numbe
   });
 
   // ---------- 2. 单章细纲 ----------
-  let outline = await genOutline(env, bookId, chapterNo, volText, memory, JSON.stringify(focus), c);
+  let outline = await genOutline(env, bookId, chapterNo, volText, memory, JSON.stringify(focus), c, stylePrefix);
 
   // ---------- 3. 审核（最多打回 maxReviewLoop 次） ----------
   const overdue = fores.filter((f) => f.due_ch && chapterNo > f.due_ch)
@@ -76,7 +81,7 @@ export async function generateChapter(env: Env, bookId: string, chapterNo: numbe
 
   for (let i = 0; i < c.maxReviewLoop; i++) {
     const reviewRaw = await chat(env, [
-      { role: "system", content: fill(await tpl(env, bookId, "review", PROMPT_REVIEW), { CH: chapterNo }) },
+      { role: "system", content: stylePrefix + fill(await tpl(env, bookId, "review", PROMPT_REVIEW), { CH: chapterNo }) },
       { role: "user", content: fill("【待审细纲】\n{{OUTLINE}}\n\n【当前世界状态】\n{{MEMORY}}\n\n【超期伏笔提醒】\n{{OVERDUE}}",
           { OUTLINE: JSON.stringify(outline), MEMORY: memory, OVERDUE: overdue }) },
     ], { temperature: 0.3, maxTokens: 2000, json: true });
@@ -93,11 +98,11 @@ export async function generateChapter(env: Env, bookId: string, chapterNo: numbe
   let issuesText: string[] = [];
 
   for (let attempt = 0; attempt < c.maxRewrite; attempt++) {
-    const draft = await genDraft(env, bookId, chapterNo, outline, memory, last?.ending_tail || "", c);
-    finalText = await polish(env, bookId, chapterNo, draft, memory, c);
+    const draft = await genDraft(env, bookId, chapterNo, outline, memory, last?.ending_tail || "", c, stylePrefix);
+    finalText = await polish(env, bookId, chapterNo, draft, memory, c, stylePrefix);
 
     // 抽取状态增量
-    delta = await extractDelta(env, bookId, chapterNo, finalText, memory);
+    delta = await extractDelta(env, bookId, chapterNo, finalText, memory, stylePrefix);
 
     // 硬规则校验
     const issues = validateDelta(charMap, delta, fores, chapterNo);
@@ -149,18 +154,18 @@ export async function generateChapter(env: Env, bookId: string, chapterNo: numbe
 }
 
 // ---------------- 各阶段封装 ----------------
-async function genOutline(env: Env, bookId: string, ch: number, volText: string, memory: string, focus: string, c: ReturnType<typeof cfg>): Promise<ChapterOutline> {
+async function genOutline(env: Env, bookId: string, ch: number, volText: string, memory: string, focus: string, c: ReturnType<typeof cfg>, sp: string): Promise<ChapterOutline> {
   const raw = await chat(env, [
-    { role: "system", content: fill(await tpl(env, bookId, "outline", PROMPT_OUTLINE), { CH: ch, CMIN: c.charsMin, CMAX: c.charsMax }) },
+    { role: "system", content: sp + fill(await tpl(env, bookId, "outline", PROMPT_OUTLINE), { CH: ch, CMIN: c.charsMin, CMAX: c.charsMax }) },
     { role: "user", content: fill("【本章焦点】\n{{FOCUS}}\n\n【本卷大纲】\n{{VOLUME}}\n\n【当前世界状态】\n{{MEMORY}}",
         { FOCUS: focus, VOLUME: volText, MEMORY: memory }) },
   ], { temperature: 0.7, maxTokens: 1600, json: true });
   return parseJson<ChapterOutline>(raw.text);
 }
 
-async function genDraft(env: Env, bookId: string, ch: number, outline: ChapterOutline, memory: string, tail: string, c: ReturnType<typeof cfg>): Promise<string> {
+async function genDraft(env: Env, bookId: string, ch: number, outline: ChapterOutline, memory: string, tail: string, c: ReturnType<typeof cfg>, sp: string): Promise<string> {
   const raw = await chat(env, [
-    { role: "system", content: fill(await tpl(env, bookId, "draft", PROMPT_DRAFT),
+    { role: "system", content: sp + fill(await tpl(env, bookId, "draft", PROMPT_DRAFT),
         { CH: ch, CMIN: c.charsMin, CMAX: c.charsMax, TITLE: outline.title }) },
     { role: "user", content: fill("【本章细纲】\n{{OUTLINE}}\n\n【当前世界状态】\n{{MEMORY}}\n\n【上一章结尾】\n{{TAIL}}",
         { OUTLINE: JSON.stringify(outline), MEMORY: memory, TAIL: tail }) },
@@ -168,17 +173,17 @@ async function genDraft(env: Env, bookId: string, ch: number, outline: ChapterOu
   return raw.text;
 }
 
-async function polish(env: Env, bookId: string, ch: number, draft: string, memory: string, c: ReturnType<typeof cfg>): Promise<string> {
+async function polish(env: Env, bookId: string, ch: number, draft: string, memory: string, c: ReturnType<typeof cfg>, sp: string): Promise<string> {
   const raw = await chat(env, [
-    { role: "system", content: fill(await tpl(env, bookId, "polish", PROMPT_POLISH), { CH: ch, CMIN: c.charsMin, CMAX: c.charsMax }) },
+    { role: "system", content: sp + fill(await tpl(env, bookId, "polish", PROMPT_POLISH), { CH: ch, CMIN: c.charsMin, CMAX: c.charsMax }) },
     { role: "user", content: fill("【初稿】\n{{DRAFT}}\n\n【当前世界状态】\n{{MEMORY}}", { DRAFT: draft, MEMORY: memory }) },
   ], { temperature: 0.6, maxTokens: 6000 });
   return raw.text || draft;
 }
 
-async function extractDelta(env: Env, bookId: string, ch: number, text: string, memory: string): Promise<StateDelta> {
+async function extractDelta(env: Env, bookId: string, ch: number, text: string, memory: string, sp: string): Promise<StateDelta> {
   const raw = await chat(env, [
-    { role: "system", content: fill(await tpl(env, bookId, "update", PROMPT_UPDATE), { CH: ch }) },
+    { role: "system", content: sp + fill(await tpl(env, bookId, "update", PROMPT_UPDATE), { CH: ch }) },
     { role: "user", content: fill("【本章定稿】\n{{TEXT}}\n\n【当前世界状态】\n{{MEMORY}}", { TEXT: text, MEMORY: memory }) },
   ], { temperature: 0.2, maxTokens: 2000, json: true });
   const d = parseJson<StateDelta>(raw.text);
