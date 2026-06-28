@@ -2,12 +2,20 @@
 // 硬规则校验器 —— 不依赖 AI 自觉，用代码守住"战力/逻辑"红线。
 // 在更新记忆库前对 StateDelta 做断言；违规则打回重写。
 // ============================================================================
-import type { CharacterState, StateDelta, Foreshadow } from "./types";
+import type { CharacterState, StateDelta, Foreshadow, Plane } from "./types";
 
 export interface ValidationIssue {
   level: "block" | "warn";
   rule: string;
   detail: string;
+}
+
+export interface ValidateOpts {
+  chapterNo: number;
+  planes: Plane[];           // 本书位面定义（空数组则跳过位面校验）
+  currentPlane: string | null;
+  minBreakthroughGap: number;
+  assetSurgeFactor: number;
 }
 
 /**
@@ -21,9 +29,12 @@ export function validateDelta(
   before: Map<string, CharacterState>,
   delta: StateDelta,
   fores: Foreshadow[],
-  chapterNo: number
+  opts: ValidateOpts
 ): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
+  const { chapterNo } = opts;
+  // 位面允许的境界上限（当前位面 max_realm）；多位面书飞升前不得越界
+  const plane = opts.planes.find((p) => p.name === opts.currentPlane) || null;
 
   for (const cu of delta.characters) {
     const prev = before.get(cu.name);
@@ -68,9 +79,70 @@ export function validateDelta(
         });
       }
     }
+
+    // 规则5：突破节奏。两次"大境界"突破间隔过短 -> 升级过快，写着写着崩。
+    const newIdx = typeof cu.realm_index === "number" ? cu.realm_index : prev?.realm_index ?? 0;
+    const isBreakthrough = !!cu.breakthrough || (prev && newIdx > prev.realm_index);
+    if (prev && isBreakthrough && newIdx > prev.realm_index) {
+      const gap = chapterNo - (prev.last_breakthrough_ch || 0);
+      const required = prev.role === "protagonist" ? opts.minBreakthroughGap : Math.ceil(opts.minBreakthroughGap / 2);
+      if (prev.last_breakthrough_ch > 0 && gap < required) {
+        issues.push({
+          level: "block",
+          rule: "BREAKTHROUGH_TOO_FAST",
+          detail: `「${cu.name}」距上次大境界突破仅 ${gap} 章(<${required})，升级过快，需拉长沉淀。`,
+        });
+      }
+    }
+
+    // 规则6：位面-境界一致性。飞升前不得拥有超出本位面上限的境界。
+    if (plane && newIdx > plane.max_realm) {
+      const ascending = !!delta.plane_change || /飞升|破空|位面|登临|渡入/.test(cu.status_notes || "");
+      issues.push({
+        level: ascending ? "warn" : "block",
+        rule: "PLANE_REALM_MISMATCH",
+        detail: `「${cu.name}」境界序 ${newIdx} 超出当前位面「${plane.name}」上限 ${plane.max_realm}${
+          ascending ? "（伴随飞升，放行但请核对换算）" : "——未飞升却越位面境界，设定崩坏。"
+        }`,
+      });
+    }
+
+    // 规则7：身家不能凭空暴涨 / 不能为负。
+    if (typeof cu.spirit_stones_delta === "number") {
+      const before2 = prev?.assets?.spirit_stones ?? 0;
+      const after = before2 + cu.spirit_stones_delta;
+      if (after < 0) {
+        issues.push({
+          level: "block",
+          rule: "ASSET_NEGATIVE",
+          detail: `「${cu.name}」灵石将变为负数(${after})：花销超过家底，账目不自洽。`,
+        });
+      }
+      if (cu.spirit_stones_delta > 0 && before2 > 0 && cu.spirit_stones_delta > before2 * opts.assetSurgeFactor) {
+        const justified = /夺取|缴获|宝库|矿脉|献祭|抄家|商会|拍卖|赏赐/.test(cu.status_notes || "");
+        issues.push({
+          level: justified ? "warn" : "block",
+          rule: "ASSET_SURGE",
+          detail: `「${cu.name}」单章灵石暴增 ${cu.spirit_stones_delta}(超家底${opts.assetSurgeFactor}倍)${
+            justified ? "（已注明来源，放行）" : "——来路不明，疑似数值膨胀。"
+          }`,
+        });
+      }
+    }
+
+    // 规则8：身法/神通/秘术须随剧情习得 —— 新增能力必须带类别与出处，杜绝凭空放招。
+    for (const m of cu.add_movement_arts || []) {
+      if (!m.kind) {
+        issues.push({
+          level: "warn",
+          rule: "SKILL_NO_SOURCE",
+          detail: `「${cu.name}」新增身法/神通《${m.name}》缺少类别与出处，疑似凭空获得，请在正文交代来历。`,
+        });
+      }
+    }
   }
 
-  // 规则5：伏笔超期未回收（不阻断，仅提醒审核阶段优先安排回收）
+  // 规则9：伏笔超期未回收（不阻断，仅提醒审核阶段优先安排回收）
   for (const f of fores) {
     if (f.status !== "resolved" && f.due_ch && chapterNo > f.due_ch) {
       issues.push({

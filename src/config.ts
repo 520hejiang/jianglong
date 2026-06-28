@@ -1,7 +1,7 @@
 // ============================================================================
 // 运行参数 & 默认境界体系
 // ============================================================================
-import type { Env, PowerRank } from "./types";
+import type { Env, PowerRank, Plane } from "./types";
 
 export const cfg = (env: Env) => ({
   model: env.DEEPSEEK_MODEL || "deepseek-v4-flash",
@@ -11,6 +11,11 @@ export const cfg = (env: Env) => ({
   maxContextTokens: parseInt(env.MAX_CONTEXT_TOKENS || "60000", 10),
   maxRewrite: 2,        // 正文质检不过最多重写次数
   maxReviewLoop: 2,     // 细纲审核最多打回次数
+  // 主角"大境界"突破的最小章节间隔：防突破节奏过快（写着写着崩）。
+  // 默认 20 章；非主角可放宽一半。控制台/单书可按需调整。
+  minBreakthroughGap: parseInt(env.MIN_BREAKTHROUGH_GAP || "20", 10),
+  // 单章灵石净增幅超过此倍数（相对此前家底）且无重大事件，视为数值膨胀告警
+  assetSurgeFactor: 50,
 });
 
 // 默认境界体系（对标凡人流，可在控制台按书覆盖 books.power_system）
@@ -24,6 +29,11 @@ export const DEFAULT_POWER_RANKS: PowerRank[] = [
   { index: 6, name: "合体", subLayers: 9 },
   { index: 7, name: "大乘", subLayers: 9 },
   { index: 8, name: "渡劫", subLayers: 9 },
+];
+
+// 默认位面划分（按默认凡人流 9 阶境界；多位面书如《玄天鼎尊》应在 books.planes 自定义）
+export const DEFAULT_PLANES: Plane[] = [
+  { name: "凡界", min_realm: 0, max_realm: 8 },
 ];
 
 // 粗略 token 估算（中文约 1.5 字/token，留余量按 1 字 ≈ 0.6 token 估）

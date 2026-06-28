@@ -127,7 +127,21 @@ export async function generateChapter(env, bookId, chapterNo, version = 1) {
 }
 ```
 
-`validateDelta()`（[`src/validators.ts`](./src/validators.ts)）实现的硬红线：死人复活、境界无故倒退、单章跨≥2大境界、功法超层、伏笔超期 —— 这些靠代码断言，AI 违反就打回，是"几百万字不崩"的最后一道防线。
+`validateDelta()`（[`src/validators.ts`](./src/validators.ts)）实现的硬红线，靠代码断言、AI 违反就打回重写，是"几百万字不崩"的最后一道防线：
+
+| 规则 | 作用 |
+|---|---|
+| `REVIVE_DEAD` | 死人不得复活（除非控制台手动改） |
+| `REALM_REGRESS` | 境界无故倒退（被废/封印需在 status 注明才放行） |
+| `REALM_LEAP` | 单章跨 ≥2 大境界 |
+| `TECH_OVERLAYER` | 功法层数超过上限 |
+| `BREAKTHROUGH_TOO_FAST` | **突破节奏**：两次大境界突破间隔 < 阈值(主角默认20章)，防升级过快 |
+| `PLANE_REALM_MISMATCH` | **位面-境界一致**：未飞升却拥有超出本位面上限的境界 |
+| `ASSET_NEGATIVE` / `ASSET_SURGE` | **身家账目**：灵石花成负数，或单章暴增 >家底50倍且无出处 |
+| `SKILL_NO_SOURCE` | **身法/神通须随剧情习得**：新增能力无类别/来历，疑似凭空放招 |
+| `FORESHADOW_OVERDUE` | 伏笔超期未回收（提醒） |
+
+主角的**家底（灵石/丹药/材料）**、**功法/身法/神通**、**所处位面**全部结构化存于 `characters`/`books`，并在每章生成前编入上下文（`compileMemoryContext` 单列"主角家底与已习得能力"），从源头约束 LLM"只能花已有的、只能用已习得的"。新增字段见 [`migrations/002_assets_planes.sql`](./migrations/002_assets_planes.sql)。
 
 ---
 
