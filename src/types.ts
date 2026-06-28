@@ -13,6 +13,7 @@ export interface Env {
   TARGET_CHARS_MAX: string;
   MAX_CONTEXT_TOKENS: string;
   MIN_BREAKTHROUGH_GAP?: string;
+  POLISH_MODE?: string; // always | auto | off，默认 auto（仅在检出AI味/超限/重写时润色，省钱）
   // secrets
   DEEPSEEK_API_KEY: string;
   TELEGRAM_BOT_TOKEN?: string;

@@ -6,7 +6,7 @@ import type { Env, Book, ChapterOutline, StateDelta, Plane } from "./types";
 import { cfg, DEFAULT_PLANES } from "./config";
 import { chat, parseJson } from "./llm";
 import * as M from "./memory";
-import { validateDelta, hasBlocking, formatIssues } from "./validators";
+import { validateDelta, hasBlocking, formatIssues, detectSlop } from "./validators";
 import {
   PROMPT_EXTRACT, PROMPT_OUTLINE, PROMPT_REVIEW, PROMPT_DRAFT, PROMPT_POLISH, PROMPT_UPDATE,
 } from "./prompts";
@@ -108,14 +108,27 @@ export async function generateChapter(env: Env, bookId: string, chapterNo: numbe
     if (review.revised_outline) outline = review.revised_outline as ChapterOutline;
   }
 
-  // ---------- 4. 正文生成 + 5. 润色质检 + 硬校验（不过则重写） ----------
+  // ---------- 4. 正文生成 + 5. 按需润色 + 硬校验（不过则重写） ----------
+  // 最近章节开头，喂给 draft 以根治"每章开头雷同"
+  const openings = await M.recentOpenings(env, bookId, 5);
+  const openingsText = openings.length ? openings.map((o, i) => `${i + 1}. ${o}…`).join("\n") : "（暂无，本章为靠前章节）";
+
   let finalText = "";
   let delta: StateDelta | null = null;
   let issuesText: string[] = [];
 
   for (let attempt = 0; attempt < c.maxRewrite; attempt++) {
-    const draft = await genDraft(env, bookId, chapterNo, outline, memory, last?.ending_tail || "", c, stylePrefix);
-    finalText = await polish(env, bookId, chapterNo, draft, memory, c, stylePrefix);
+    const draft = await genDraft(env, bookId, chapterNo, outline, memory, last?.ending_tail || "", c, stylePrefix, openingsText);
+
+    // 按需润色：always 恒润；auto 仅在检出AI味/正在重写时润；off 从不润 —— 省钱又不丢质量
+    const slop = detectSlop(draft);
+    const needPolish = c.polishMode === "always" || (c.polishMode === "auto" && (slop.hit || attempt > 0));
+    if (needPolish) {
+      if (slop.hit) await M.log(env, { bookId, chapterNo, stage: "polish", message: `触发润色去AI味: ${slop.reasons.join("；")}` });
+      finalText = await polish(env, bookId, chapterNo, draft, memory, c, stylePrefix);
+    } else {
+      finalText = draft;
+    }
 
     // 抽取状态增量
     delta = await extractDelta(env, bookId, chapterNo, finalText, memory, stylePrefix);
@@ -189,10 +202,10 @@ async function genOutline(env: Env, bookId: string, ch: number, volText: string,
   return parseJson<ChapterOutline>(raw.text);
 }
 
-async function genDraft(env: Env, bookId: string, ch: number, outline: ChapterOutline, memory: string, tail: string, c: ReturnType<typeof cfg>, sp: string): Promise<string> {
+async function genDraft(env: Env, bookId: string, ch: number, outline: ChapterOutline, memory: string, tail: string, c: ReturnType<typeof cfg>, sp: string, openings: string): Promise<string> {
   const raw = await chat(env, [
     { role: "system", content: sp + fill(await tpl(env, bookId, "draft", PROMPT_DRAFT),
-        { CH: ch, CMIN: c.charsMin, CMAX: c.charsMax, TITLE: outline.title }) },
+        { CH: ch, CMIN: c.charsMin, CMAX: c.charsMax, TITLE: outline.title, OPENINGS: openings }) },
     { role: "user", content: fill("【本章细纲】\n{{OUTLINE}}\n\n【当前世界状态】\n{{MEMORY}}\n\n【上一章结尾】\n{{TAIL}}",
         { OUTLINE: JSON.stringify(outline), MEMORY: memory, TAIL: tail }) },
   ], { temperature: 0.85, maxTokens: 6000 });

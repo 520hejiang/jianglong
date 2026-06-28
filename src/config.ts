@@ -16,6 +16,8 @@ export const cfg = (env: Env) => ({
   minBreakthroughGap: parseInt(env.MIN_BREAKTHROUGH_GAP || "20", 10),
   // 单章灵石净增幅超过此倍数（相对此前家底）且无重大事件，视为数值膨胀告警
   assetSurgeFactor: 50,
+  // 润色策略：always=每章都润色；auto=仅在检出AI味/篇幅超限/重写时润色(默认,省钱)；off=从不润色
+  polishMode: (env.POLISH_MODE || "auto") as "always" | "auto" | "off",
 });
 
 // 默认境界体系（对标凡人流，可在控制台按书覆盖 books.power_system）

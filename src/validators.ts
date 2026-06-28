@@ -156,6 +156,40 @@ export function validateDelta(
   return issues;
 }
 
+// ---------- AI 味 / 烂俗套话检测（纯代码，零成本，用于决定是否需要润色） ----------
+const SLOP_PHRASES = [
+  "空气仿佛凝固", "空气凝固", "安静得可怕", "时间仿佛静止", "时间静止", "不知过了多久",
+  "仿佛一道惊雷", "如遭雷击", "五味杂陈", "才刚刚开始", "悄然破碎", "勾起一抹", "勾起一丝",
+  "眸光一闪", "眼中闪过一丝", "弥漫着", "的气息", "命运的齿轮", "这是一个", "有什么东西",
+  "无法言喻", "难以言喻", "心如刀绞", "瞳孔骤缩", "嘴角微微", "似乎在诉说",
+];
+
+export interface SlopReport {
+  hit: boolean;
+  reasons: string[];
+}
+
+// 扫描正文，返回是否疑似 AI 腔（命中套话 / 比喻词过密 / 段落过于均匀）。
+export function detectSlop(text: string): SlopReport {
+  const reasons: string[] = [];
+  const hits = SLOP_PHRASES.filter((p) => text.includes(p));
+  if (hits.length) reasons.push(`烂俗套话: ${hits.slice(0, 5).join("、")}`);
+
+  // 比喻词密度：仿佛/宛如/犹如/好似/如同 —— 每千字超过 6 次视为过密
+  const simile = (text.match(/仿佛|宛如|犹如|好似|如同/g) || []).length;
+  const per1k = simile / Math.max(1, text.length / 1000);
+  if (per1k > 6) reasons.push(`比喻词过密(${simile}处)`);
+
+  // 段落长度过于均匀（AI 倾向等长段）：变异系数过低
+  const paras = text.split(/\n{2,}/).map((p) => p.replace(/\s/g, "").length).filter((n) => n > 0);
+  if (paras.length >= 6) {
+    const mean = paras.reduce((a, b) => a + b, 0) / paras.length;
+    const sd = Math.sqrt(paras.reduce((a, b) => a + (b - mean) ** 2, 0) / paras.length);
+    if (mean > 0 && sd / mean < 0.25) reasons.push("段落长度过于均匀(疑似AI节奏)");
+  }
+  return { hit: reasons.length > 0, reasons };
+}
+
 export const hasBlocking = (issues: ValidationIssue[]) =>
   issues.some((i) => i.level === "block");
 
