@@ -4,7 +4,7 @@
 // ============================================================================
 import type { Env, Book, ChapterOutline, StateDelta, Plane } from "./types";
 import { cfg, DEFAULT_PLANES } from "./config";
-import { chat, parseJson } from "./llm";
+import { chat, parseJson, chatJSON } from "./llm";
 import * as M from "./memory";
 import { validateDelta, hasBlocking, formatIssues, detectSlop } from "./validators";
 import {
@@ -236,12 +236,11 @@ export async function advanceBook(env: Env, bookId: string, budgetMs = 18000): P
 
 // ---------------- 各阶段封装 ----------------
 async function genOutline(env: Env, bookId: string, ch: number, volText: string, memory: string, focus: string, c: ReturnType<typeof cfg>, sp: string): Promise<ChapterOutline> {
-  const raw = await chat(env, [
+  return chatJSON<ChapterOutline>(env, [
     { role: "system", content: sp + fill(await tpl(env, bookId, "outline", PROMPT_OUTLINE), { CH: ch, CMIN: c.charsMin, CMAX: c.charsMax }) },
     { role: "user", content: fill("【本章焦点】\n{{FOCUS}}\n\n【本卷大纲】\n{{VOLUME}}\n\n【当前世界状态】\n{{MEMORY}}",
         { FOCUS: focus, VOLUME: volText, MEMORY: memory }) },
-  ], { temperature: 0.7, maxTokens: 1600, json: true });
-  return parseJson<ChapterOutline>(raw.text);
+  ], { temperature: 0.7, maxTokens: 1600 });
 }
 
 async function genDraft(env: Env, bookId: string, ch: number, outline: ChapterOutline, memory: string, tail: string, c: ReturnType<typeof cfg>, sp: string, openings: string): Promise<string> {
@@ -263,11 +262,10 @@ async function polish(env: Env, bookId: string, ch: number, draft: string, memor
 }
 
 async function extractDelta(env: Env, bookId: string, ch: number, text: string, memory: string, sp: string): Promise<StateDelta> {
-  const raw = await chat(env, [
+  const d = await chatJSON<StateDelta>(env, [
     { role: "system", content: sp + fill(await tpl(env, bookId, "update", PROMPT_UPDATE), { CH: ch }) },
     { role: "user", content: fill("【本章定稿】\n{{TEXT}}\n\n【当前世界状态】\n{{MEMORY}}", { TEXT: text, MEMORY: memory }) },
-  ], { temperature: 0.2, maxTokens: 2000, json: true });
-  const d = parseJson<StateDelta>(raw.text);
+  ], { temperature: 0.2, maxTokens: 2000 });
   // 兜底字段
   d.characters ??= []; d.foreshadow_new ??= []; d.foreshadow_update ??= [];
   d.plot ??= {}; d.tags ??= []; d.summary ??= "";

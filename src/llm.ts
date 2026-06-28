@@ -67,7 +67,7 @@ export async function chat(
   throw new Error(`DeepSeek 调用失败: ${String(lastErr)}`);
 }
 
-// 要求模型返回 JSON 时的稳健解析（容忍 ```json 包裹、前后噪声）
+// 要求模型返回 JSON 时的稳健解析（容忍 ```json 包裹、前后噪声、尾逗号、智能引号等常见瑕疵）
 export function parseJson<T>(raw: string): T {
   let s = raw.trim();
   const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -75,7 +75,37 @@ export function parseJson<T>(raw: string): T {
   const start = s.indexOf("{");
   const end = s.lastIndexOf("}");
   if (start >= 0 && end > start) s = s.slice(start, end + 1);
-  return JSON.parse(s) as T;
+  try {
+    return JSON.parse(s) as T;
+  } catch {
+    // 容错二次尝试：去尾逗号、全角引号转半角、中文逗号误用、补缺失的数组/对象间逗号
+    let f = s
+      .replace(/,\s*([}\]])/g, "$1")            // 尾逗号
+      .replace(/[“”]/g, '"').replace(/[‘’]/g, "'") // 智能引号
+      .replace(/"\s*\n\s*"/g, '",\n"')          // 相邻字符串漏逗号（"a"\n"b" -> "a",\n"b"）
+      .replace(/"\s+"/g, '", "');               // 同行相邻字符串漏逗号（"a" "b"）
+    return JSON.parse(f) as T;
+  }
+}
+
+// 调 LLM 并要求 JSON；解析失败自动重试（降温重来），抵御模型偶发的格式不规范。
+export async function chatJSON<T>(
+  env: Env,
+  messages: ChatMsg[],
+  opts: { temperature?: number; maxTokens?: number } = {},
+  tries = 3
+): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < tries; i++) {
+    const r = await chat(env, messages, {
+      temperature: i === 0 ? (opts.temperature ?? 0.5) : 0.15, // 重试时降温，提高 JSON 规范性
+      maxTokens: opts.maxTokens,
+      json: true,
+    });
+    try { return parseJson<T>(r.text); }
+    catch (e) { lastErr = e; }
+  }
+  throw new Error(`JSON 解析失败(已重试${tries}次): ${String(lastErr)}`);
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
