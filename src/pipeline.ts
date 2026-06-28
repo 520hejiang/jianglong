@@ -54,9 +54,11 @@ export interface GenState {
   // 完成时回填，供 result 使用
   title?: string;
   wc?: number;
+  isRewrite?: boolean; // 重写模式：只更新正文/摘要，不重复应用状态增量、不推进进度
 }
 
 const GENJOB_KEY = "__genjob";
+const REWRITE_KEY = "__rewritejob";
 
 // 执行当前阶段的一步，返回推进后的状态。每步只做一次（或极少次）LLM 调用，确保单次调用很短。
 async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState> {
@@ -144,7 +146,8 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
         minBreakthroughGap: c.minBreakthroughGap, assetSurgeFactor: c.assetSurgeFactor,
       });
       const issuesText = issues.map((x) => `[${x.level}] ${x.rule}: ${x.detail}`);
-      if (hasBlocking(issues) && st.attempt < c.maxRewrite - 1) {
+      // 重写模式不因校验回炉（不应用增量，校验意义有限）；向前生成才回炉
+      if (!st.isRewrite && hasBlocking(issues) && st.attempt < c.maxRewrite - 1) {
         await M.log(env, { bookId, chapterNo: ch, level: "warn", stage: "update", message: `质检未过(尝试${st.attempt + 1})，回炉重写: ${formatIssues(issues)}` });
         // 回到 draft 重写，把违规反馈并入 memory
         return { ...st, stage: "draft", attempt: st.attempt + 1, memory: st.memory! + `\n\n【上一次生成违反了以下硬规则，本次务必修正】\n${formatIssues(issues)}` };
@@ -167,9 +170,15 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
         summary: delta.summary || "", ending_tail: body.slice(-320), tags: delta.tags || [],
         word_count: wc, version: st.version, qc_report: JSON.stringify({ issues: issuesText }),
       });
-      await applyDelta(env, bookId, ch, delta, charMap);
 
-      // 仅"向前生成"时推进 next_chapter；重写旧章不推进
+      if (st.isRewrite) {
+        // 重写：只换正文/摘要(新版本)，不重复应用增量、不推进进度，避免状态被算两遍
+        await M.log(env, { bookId, chapterNo: ch, stage: "update", message: `第${ch}章已重写(v${st.version})，${wc}字`, meta: { wc, issues: issuesText } });
+        return { ...st, stage: "complete", title, wc, issues: issuesText };
+      }
+
+      await applyDelta(env, bookId, ch, delta, charMap);
+      // 仅"向前生成"时推进 next_chapter
       if (ch === book.next_chapter) {
         await env.DB.prepare(
           "UPDATE books SET next_chapter=?, total_chars=total_chars+?, cursor_volume=?, updated_at=? WHERE id=?"
@@ -210,7 +219,22 @@ export async function advanceBook(env: Env, bookId: string, budgetMs = 18000): P
   if (!got) return "idle";
   try {
     const book = await M.getBook(env, bookId);
-    if (!book || book.status !== "running") return "idle";
+    if (!book) return "idle";
+
+    // ① 重写任务优先（用户手动发起，暂停状态也照常处理）；用独立存档槽，不干扰向前生成
+    const rj = (await M.getPlot(env, bookId, REWRITE_KEY)) as GenState | null;
+    if (rj && rj.stage && rj.stage !== "complete") {
+      let st = rj;
+      while (st.stage !== "complete" && Date.now() - start < budgetMs) {
+        st = await runStep(env, bookId, st);
+        await M.setPlot(env, bookId, REWRITE_KEY, st);
+      }
+      if (st.stage === "complete") { await M.setPlot(env, bookId, REWRITE_KEY, null); return "completed"; }
+      return "progress";
+    }
+
+    // ② 向前生成（仅 running）
+    if (book.status !== "running") return "idle";
     if (book.target_chapters && book.next_chapter > book.target_chapters) {
       await M.setBookStatus(env, bookId, "finished");
       return "idle";
@@ -232,6 +256,18 @@ export async function advanceBook(env: Env, bookId: string, budgetMs = 18000): P
   } finally {
     await M.releaseLock(env, bookId);
   }
+}
+
+// 发起"重写某章"：设置独立的重写存档槽（新版本号），advanceBook 会优先把它跑完。
+// 重写只更新该章正文/摘要，不重复应用状态增量（避免灵石/伏笔被算两遍）。
+export async function startRewrite(env: Env, bookId: string, chapterNo: number): Promise<number> {
+  const r = await env.DB.prepare(
+    "SELECT COALESCE(MAX(version),0) v FROM chapters WHERE book_id=? AND chapter_no=?"
+  ).bind(bookId, chapterNo).first<{ v: number }>();
+  const version = (r?.v ?? 0) + 1;
+  const job: GenState = { chapterNo, version, stage: "extract", attempt: 0, isRewrite: true };
+  await M.setPlot(env, bookId, REWRITE_KEY, job);
+  return version;
 }
 
 // ---------------- 各阶段封装 ----------------

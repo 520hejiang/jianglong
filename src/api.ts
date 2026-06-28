@@ -8,8 +8,7 @@
 //   生成：手动触发一章 / 重写某章
 // ============================================================================
 import type { Env } from "./types";
-import { dispatchChapter } from "./jobs";
-import { advanceBook } from "./pipeline";
+import { advanceBook, startRewrite } from "./pipeline";
 import { ensureSchema } from "./schema";
 
 const json = (data: unknown, status = 200) =>
@@ -108,9 +107,10 @@ export async function api(req: Request, env: Env, ctx: ExecutionContext): Promis
       const id = mGen[1];
       const body = await req.json<any>().catch(() => ({}));
       if (body.rewrite && body.chapter) {
-        // 重写指定章：走队列(付费)或后台整章(可能较慢)
-        await dispatchChapter(env, ctx, { bookId: id, chapterNo: body.chapter, reason: "rewrite" });
-        return json({ ok: true, rewriting: body.chapter });
+        // 重写指定章：断点续传式，优先跑完；只换正文不重复应用状态
+        const v = await startRewrite(env, id, body.chapter);
+        ctx.waitUntil(advanceBook(env, id, 18000).catch(() => {}));
+        return json({ ok: true, rewriting: body.chapter, version: v, note: "重写已排期，后台逐步生成，约数分钟后刷新该章即可看到新版" });
       }
       // 向前生成：断点续传推进，后台继续，立即返回
       const b = await env.DB.prepare("SELECT next_chapter FROM books WHERE id=?").bind(id).first<{ next_chapter: number }>();
