@@ -34,7 +34,8 @@ export interface ChapterResult {
 }
 
 // 生成阶段（断点续传：每完成一步存档，被掐断也能从断点继续）
-type Stage = "extract" | "outline" | "review" | "draft" | "polish" | "update" | "finalize" | "complete";
+// "rewrite" 是重写专用单步：取原章正文 → 毒舌润色 → 存新版本，不重跑剧情、不动状态。
+type Stage = "extract" | "outline" | "review" | "draft" | "polish" | "update" | "finalize" | "rewrite" | "complete";
 
 export interface GenState {
   chapterNo: number;
@@ -221,16 +222,12 @@ export async function advanceBook(env: Env, bookId: string, budgetMs = 18000): P
     const book = await M.getBook(env, bookId);
     if (!book) return "idle";
 
-    // ① 重写任务优先（用户手动发起，暂停状态也照常处理）；用独立存档槽，不干扰向前生成
+    // ① 重写任务优先（用户手动发起，暂停态也处理）。重写=单步：取原文→毒舌润色→存新版本。
     const rj = (await M.getPlot(env, bookId, REWRITE_KEY)) as GenState | null;
     if (rj && rj.stage && rj.stage !== "complete") {
-      let st = rj;
-      while (st.stage !== "complete" && Date.now() - start < budgetMs) {
-        st = await runStep(env, bookId, st);
-        await M.setPlot(env, bookId, REWRITE_KEY, st);
-      }
-      if (st.stage === "complete") { await M.setPlot(env, bookId, REWRITE_KEY, null); return "completed"; }
-      return "progress";
+      const st = await rewriteStep(env, bookId, rj);
+      await M.setPlot(env, bookId, REWRITE_KEY, st.stage === "complete" ? null : st);
+      return st.stage === "complete" ? "completed" : "progress";
     }
 
     // ② 向前生成（仅 running）
@@ -265,9 +262,40 @@ export async function startRewrite(env: Env, bookId: string, chapterNo: number):
     "SELECT COALESCE(MAX(version),0) v FROM chapters WHERE book_id=? AND chapter_no=?"
   ).bind(bookId, chapterNo).first<{ v: number }>();
   const version = (r?.v ?? 0) + 1;
-  const job: GenState = { chapterNo, version, stage: "extract", attempt: 0, isRewrite: true };
+  const job: GenState = { chapterNo, version, stage: "rewrite", attempt: 0, isRewrite: true };
   await M.setPlot(env, bookId, REWRITE_KEY, job);
   return version;
+}
+
+// 重写单步：拿该章现有最新正文 → 用"毒舌老编辑"只改文笔(保留原剧情/状态) → 存为新版本。
+// 不重跑 extract/outline/draft，不喂当前世界状态(避免把后续章节剧情带进旧章)，不应用任何状态增量。
+async function rewriteStep(env: Env, bookId: string, st: GenState): Promise<GenState> {
+  const c = cfg(env);
+  const book = await M.getBook(env, bookId);
+  if (!book) return { ...st, stage: "complete" };
+  const stylePrefix = book.style_prompt_override
+    ? `【本书特别文风/设定要求（优先级最高）】\n${book.style_prompt_override}\n\n` : "";
+  // 取"原始版本"(version 最小)的正文来润色，避免把之前可能跑偏的重写版当成原文
+  const ex = await env.DB.prepare(
+    "SELECT title, content, outline, summary, tags FROM chapters WHERE book_id=? AND chapter_no=? AND status='done' ORDER BY version ASC LIMIT 1"
+  ).bind(bookId, st.chapterNo).first<any>();
+  if (!ex) {
+    await M.log(env, { bookId, chapterNo: st.chapterNo, level: "warn", stage: "rewrite", message: "找不到原章节，无法重写" });
+    return { ...st, stage: "complete" };
+  }
+  const guard = "（重写模式：严格保留本章原有的剧情走向、人物状态、所有数字与设定，只提升文笔——去 AI 腔、加紧节奏、补主角内心戏。绝不引入后续章节的信息，绝不改变情节。）";
+  const polished = await polish(env, bookId, st.chapterNo, ex.content, guard, c, stylePrefix);
+  const body = normalizeText(stripLeadingTitle(polished));
+  const title = ex.title || `第${st.chapterNo}章`;
+  const cleaned = `第${st.chapterNo}章 ${title}\n\n${body}`;
+  const wc = body.replace(/\s/g, "").length;
+  await M.saveChapter(env, bookId, {
+    chapter_no: st.chapterNo, title, outline: ex.outline || "{}", content: cleaned,
+    summary: ex.summary || "", ending_tail: body.slice(-320), tags: safeParse<string[]>(ex.tags, []),
+    word_count: wc, version: st.version, qc_report: JSON.stringify({ rewrite: true }),
+  });
+  await M.log(env, { bookId, chapterNo: st.chapterNo, stage: "rewrite", message: `第${st.chapterNo}章已重写(v${st.version})，${wc}字` });
+  return { ...st, stage: "complete", title, wc };
 }
 
 // ---------------- 各阶段封装 ----------------

@@ -100,7 +100,7 @@ globalThis.fetch = async (_url, init) => {
   else if (sys.includes('生成一份单章细纲')) { calls.outline++; content = JSON.stringify({ title: `暗巷杀机${ch}`, goal: '推进主线', beats: ['踩点', '伏击', '收割'], characters: ['陆长安'], location: '坊市暗巷', conflicts: '黑吃黑', protagonist_cards: ['毒粉', '四象困煞阵'], foreshadow_plant: [], foreshadow_resolve: [], power_notes: '同阶险胜', hook: '有人在暗处盯着他' }); }
   else if (sys.includes('严格的设定校验官')) { calls.review++; content = JSON.stringify({ approved: true, issues: [], revised_outline: {} }); }
   else if (sys.includes('根据细纲撰写')) { calls.draft++; content = makeDraft(ch); }
-  else if (sys.includes('润色与自洽修订')) { calls.polish++; content = makeDraft(ch).replace(/空气仿佛凝固，不知过了多久，他嘴角勾起一抹弧度。\n\n/, ''); }
+  else if (sys.includes('老编辑') || sys.includes('润色')) { calls.polish++; content = makeDraft(ch).replace(/空气仿佛凝固，不知过了多久，他嘴角勾起一抹弧度。\n\n/, ''); }
   else if (sys.includes('抽取本章发生的状态变化')) { calls.update++; content = makeDelta(ch); }
   else content = '{}';
   return new Response(JSON.stringify({ choices: [{ message: { content } }], usage: { prompt_tokens: 50, completion_tokens: 50, total_tokens: 100 } }), { status: 200, headers: { 'content-type': 'application/json' } });
