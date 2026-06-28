@@ -101,6 +101,19 @@ export async function api(req: Request, env: Env, ctx: ExecutionContext): Promis
       return json({ ok: true });
     }
 
+    // 重置生成：清掉卡住的生成/重写存档与锁，恢复正常推进（解卡用）
+    const mReset = p.match(/^\/api\/books\/([^/]+)\/reset$/);
+    if (mReset && req.method === "POST") {
+      const id = mReset[1];
+      await env.DB.prepare("DELETE FROM plot_state WHERE book_id=? AND key IN ('__genjob','__rewritejob')").bind(id).run();
+      await env.KV.delete(`genlock:${id}`);
+      await env.DB.prepare("UPDATE books SET last_error=NULL, updated_at=? WHERE id=?").bind(now(), id).run();
+      await env.DB.prepare("INSERT INTO logs (id,book_id,level,stage,message,meta,created_at) VALUES (?,?,?,?,?,?,?)")
+        .bind(uid(), id, "warn", "manual", "手动重置生成（清掉卡住的存档与锁）", null, now()).run();
+      ctx.waitUntil(advanceBook(env, id, 18000).catch(() => {}));
+      return json({ ok: true, note: "已重置并重新推进" });
+    }
+
     // 手动生成一章 / 重写某章
     const mGen = p.match(/^\/api\/books\/([^/]+)\/generate$/);
     if (mGen && req.method === "POST") {

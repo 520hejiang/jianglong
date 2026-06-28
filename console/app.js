@@ -65,6 +65,7 @@ async function loadBooks() {
         <button onclick="startBook('${b.id}')">▶ 开始</button>
         <button onclick="stopBook('${b.id}')">⏸ 暂停</button>
         <button onclick="genOne('${b.id}')">⚡ 立即生成一章</button>
+        <button class="danger" onclick="resetBook('${b.id}')">🔧 重置生成</button>
         <code class="meta">${b.id}</code>
       </div>
     </div>`).join("") || "<p class='hint'>暂无书，点击「新建书」。</p>";
@@ -72,7 +73,12 @@ async function loadBooks() {
 }
 async function startBook(id) { await call(`/api/books/${id}/start`, { method: "POST" }); loadBooks(); }
 async function stopBook(id) { await call(`/api/books/${id}/stop`, { method: "POST" }); loadBooks(); }
-async function genOne(id) { await call(`/api/books/${id}/generate`, { method: "POST", body: "{}" }); alert("已入队，约1-2分钟后出章"); }
+async function genOne(id) { await call(`/api/books/${id}/generate`, { method: "POST", body: "{}" }); alert("已开始，约1-2分钟后出章"); }
+async function resetBook(id) {
+  if (!confirm("重置生成？会清掉卡住的生成/重写进度与锁，然后从下一章继续。已写好的章节不受影响。")) return;
+  try { await call(`/api/books/${id}/reset`, { method: "POST" }); alert("已重置，约1-2分钟后会重新开始生成"); loadBooks(); }
+  catch (e) { alert("重置失败：" + e); }
+}
 
 // 一键导入完整大纲 JSON（手机首选：含文风/位面/角色，无需电脑跑脚本）
 function openImport() {

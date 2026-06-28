@@ -56,6 +56,7 @@ export interface GenState {
   title?: string;
   wc?: number;
   isRewrite?: boolean; // 重写模式：只更新正文/摘要，不重复应用状态增量、不推进进度
+  startedAt?: number;  // 重写发起时间，用于"长时间未完成则放弃"防卡死
 }
 
 const GENJOB_KEY = "__genjob";
@@ -222,12 +223,33 @@ export async function advanceBook(env: Env, bookId: string, budgetMs = 18000): P
     const book = await M.getBook(env, bookId);
     if (!book) return "idle";
 
-    // ① 重写任务优先（用户手动发起，暂停态也处理）。重写=单步：取原文→毒舌润色→存新版本。
+    // ① 重写任务优先（用户手动发起，暂停态也处理）。重写=单步：取原文→毒舌润色→覆盖。
+    // 抗卡死：超过 8 分钟仍未完成(多半被平台反复掐断)则放弃；抛错最多 3 次后放弃。
+    // 两者都会清空重写任务，避免一直堵住正常的向前生成。
     const rj = (await M.getPlot(env, bookId, REWRITE_KEY)) as GenState | null;
     if (rj && rj.stage && rj.stage !== "complete") {
-      const st = await rewriteStep(env, bookId, rj);
-      await M.setPlot(env, bookId, REWRITE_KEY, st.stage === "complete" ? null : st);
-      return st.stage === "complete" ? "completed" : "progress";
+      const stale = rj.startedAt && Date.now() - rj.startedAt > 8 * 60 * 1000;
+      if (stale) {
+        await M.setPlot(env, bookId, REWRITE_KEY, null);
+        await M.log(env, { bookId, chapterNo: rj.chapterNo, level: "warn", stage: "rewrite", message: "重写长时间未完成，已放弃，恢复正常生成" });
+        // 落空，继续往下做向前生成
+      } else {
+        try {
+          const st = await rewriteStep(env, bookId, rj);
+          await M.setPlot(env, bookId, REWRITE_KEY, st.stage === "complete" ? null : st);
+          return st.stage === "complete" ? "completed" : "progress";
+        } catch (e) {
+          const attempt = (rj.attempt || 0) + 1;
+          await M.log(env, { bookId, chapterNo: rj.chapterNo, level: "error", stage: "rewrite", message: `重写失败(第${attempt}次): ${String(e)}` });
+          if (attempt >= 3) {
+            await M.setPlot(env, bookId, REWRITE_KEY, null);
+            await M.log(env, { bookId, chapterNo: rj.chapterNo, level: "warn", stage: "rewrite", message: "重写多次失败已放弃，恢复正常生成" });
+          } else {
+            await M.setPlot(env, bookId, REWRITE_KEY, { ...rj, attempt });
+          }
+          return "progress";
+        }
+      }
     }
 
     // ② 向前生成（仅 running）
@@ -262,7 +284,7 @@ export async function startRewrite(env: Env, bookId: string, chapterNo: number):
     "SELECT COALESCE(MAX(version),0) v FROM chapters WHERE book_id=? AND chapter_no=?"
   ).bind(bookId, chapterNo).first<{ v: number }>();
   const version = (r?.v ?? 0) + 1;
-  const job: GenState = { chapterNo, version, stage: "rewrite", attempt: 0, isRewrite: true };
+  const job: GenState = { chapterNo, version, stage: "rewrite", attempt: 0, isRewrite: true, startedAt: Date.now() };
   await M.setPlot(env, bookId, REWRITE_KEY, job);
   return version;
 }
