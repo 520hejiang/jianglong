@@ -8,12 +8,27 @@ let curChapter = null; // { bookId, chapter_no }
 document.getElementById("apiBase").value = API;
 document.getElementById("token").value = TOKEN;
 
-function saveConn() {
+async function saveConn() {
   API = document.getElementById("apiBase").value.trim().replace(/\/$/, "");
   TOKEN = document.getElementById("token").value.trim();
   localStorage.setItem("apiBase", API);
   localStorage.setItem("token", TOKEN);
-  loadBooks(); fillBookSelectors();
+  if (!API || !TOKEN) { alert("请先填写「后台网址」和「ADMIN_TOKEN」两个框"); return; }
+  // 先做健康检查 + 鉴权测试，把真实问题暴露出来（而不是"毫无反应"）
+  try {
+    const h = await fetch(API + "/health").then((r) => r.json());
+    const bad = Object.entries(h).filter(([, v]) => String(v).includes("FAIL"));
+    if (bad.length) { alert("后台自检发现问题，请按教程补齐：\n" + bad.map(([k, v]) => `· ${k}: ${v}`).join("\n")); return; }
+  } catch (e) {
+    alert("连不上后台！请检查「后台网址」是否填对(应以 .workers.dev 结尾，不要带斜杠)。\n\n技术细节：" + e); return;
+  }
+  try {
+    const books = await call("/api/books");
+    await loadBooks();
+    alert(`✅ 连接成功！当前有 ${books.length} 本书。` + (books.length ? "" : "\n还没有书——可在书架点「🧙 新书向导」导入大纲。"));
+  } catch (e) {
+    alert("后台正常，但鉴权/读取失败：\n" + e + "\n\n多半是「ADMIN_TOKEN」填错了，要和你在 Cloudflare 设的一致。");
+  }
 }
 
 async function call(path, opts = {}) {
@@ -57,6 +72,26 @@ async function loadBooks() {
 async function startBook(id) { await call(`/api/books/${id}/start`, { method: "POST" }); loadBooks(); }
 async function stopBook(id) { await call(`/api/books/${id}/stop`, { method: "POST" }); loadBooks(); }
 async function genOne(id) { await call(`/api/books/${id}/generate`, { method: "POST", body: "{}" }); alert("已入队，约1-2分钟后出章"); }
+
+// 一键导入完整大纲 JSON（手机首选：含文风/位面/角色，无需电脑跑脚本）
+function openImport() {
+  if (!API || !TOKEN) return alert("请先在右上角填后台网址 + ADMIN_TOKEN 并点「连接」");
+  document.getElementById("importDlg").showModal();
+}
+async function doImport() {
+  let d;
+  try { d = JSON.parse(document.getElementById("imp_json").value); }
+  catch (e) { return alert("JSON 格式不对，请确认整段复制完整：\n" + e); }
+  try {
+    const chars = d.characters || [];
+    const body = { ...d }; delete body.characters;
+    const res = await call("/api/books", { method: "POST", body: JSON.stringify(body) });
+    if (chars.length) await call(`/api/books/${res.id}/characters`, { method: "POST", body: JSON.stringify({ characters: chars }) });
+    document.getElementById("importDlg").close();
+    alert(`✅ 已创建《${d.title || "未命名"}》并导入 ${chars.length} 个角色。\n去书架点「▶ 开始」即可自动写。`);
+    loadBooks();
+  } catch (e) { alert("导入失败：" + e); }
+}
 
 // ======================= 新书向导 =======================
 const WIZ_STEPS = ["基础·文风", "总纲·设定", "境界体系", "分卷大纲", "核心人物", "确认创建"];

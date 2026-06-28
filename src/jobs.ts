@@ -8,6 +8,7 @@ import type { Env, GenJob } from "./types";
 import { generateChapter } from "./pipeline";
 import * as M from "./memory";
 import { tg } from "./telegram";
+import { ensureSchema } from "./schema";
 
 // 决定一个 job 怎么跑：能入队就入队，否则后台内联生成。
 export async function dispatchChapter(env: Env, ctx: ExecutionContext, job: GenJob): Promise<void> {
@@ -20,6 +21,7 @@ export async function dispatchChapter(env: Env, ctx: ExecutionContext, job: GenJ
 
 // 实际执行一个章节任务：加锁 -> 生成 -> 通知 -> 解锁。失败时置书为 error 并抛出（供队列重试）。
 export async function runChapterJob(env: Env, job: GenJob): Promise<void> {
+  await ensureSchema(env); // 保证表已建好（手机/Cron 路径也覆盖）
   const got = await M.acquireLock(env, job.bookId, 1500); // 25min，覆盖慢章，配合幂等防重复
   if (!got) return; // 该书已有一章在生成，跳过
   try {
