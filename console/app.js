@@ -281,9 +281,21 @@ function copyChapter() {
 }
 async function rewriteCurrent() {
   if (!curChapter) return alert("先打开一章");
-  if (!confirm(`重写第${curChapter.chapter_no}章？将生成新版本。`)) return;
+  if (!confirm(`重写第${curChapter.chapter_no}章？将用新文风覆盖本章正文（不新增、不改剧情）。`)) return;
   await call(`/api/books/${curChapter.bookId}/generate`, { method: "POST", body: JSON.stringify({ chapter: curChapter.chapter_no, rewrite: true }) });
-  alert("已入队重写");
+  alert("已开始重写，约几分钟后刷新本章即可看到覆盖后的新版");
+}
+async function deleteCurrent() {
+  if (!curChapter) return alert("先打开一章");
+  if (!confirm("确定要删除这一章吗？此操作不可恢复。")) return;
+  try {
+    await call(`/api/books/${curChapter.bookId}/chapters/${curChapter.chapter_no}`, { method: "DELETE" });
+    const bid = curChapter.bookId;
+    curChapter = null;
+    document.getElementById("chapterText").textContent = ""; // 清空阅读区
+    await loadChapters();                                    // 刷新左侧列表
+    alert("已删除");
+  } catch (e) { alert("删除失败：" + e); }
 }
 
 // ---- 记忆库 ----

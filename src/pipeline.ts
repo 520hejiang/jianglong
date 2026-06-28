@@ -277,7 +277,7 @@ async function rewriteStep(env: Env, bookId: string, st: GenState): Promise<GenS
     ? `【本书特别文风/设定要求（优先级最高）】\n${book.style_prompt_override}\n\n` : "";
   // 取"原始版本"(version 最小)的正文来润色，避免把之前可能跑偏的重写版当成原文
   const ex = await env.DB.prepare(
-    "SELECT title, content, outline, summary, tags FROM chapters WHERE book_id=? AND chapter_no=? AND status='done' ORDER BY version ASC LIMIT 1"
+    "SELECT id, title, content FROM chapters WHERE book_id=? AND chapter_no=? AND status='done' ORDER BY version ASC LIMIT 1"
   ).bind(bookId, st.chapterNo).first<any>();
   if (!ex) {
     await M.log(env, { bookId, chapterNo: st.chapterNo, level: "warn", stage: "rewrite", message: "找不到原章节，无法重写" });
@@ -289,12 +289,14 @@ async function rewriteStep(env: Env, bookId: string, st: GenState): Promise<GenS
   const title = ex.title || `第${st.chapterNo}章`;
   const cleaned = `第${st.chapterNo}章 ${title}\n\n${body}`;
   const wc = body.replace(/\s/g, "").length;
-  await M.saveChapter(env, bookId, {
-    chapter_no: st.chapterNo, title, outline: ex.outline || "{}", content: cleaned,
-    summary: ex.summary || "", ending_tail: body.slice(-320), tags: safeParse<string[]>(ex.tags, []),
-    word_count: wc, version: st.version, qc_report: JSON.stringify({ rewrite: true }),
-  });
-  await M.log(env, { bookId, chapterNo: st.chapterNo, stage: "rewrite", message: `第${st.chapterNo}章已重写(v${st.version})，${wc}字` });
+  // 就地覆盖原记录（不新增版本，避免列表出现重复章），并清掉该章其它残留版本
+  await env.DB.prepare(
+    "UPDATE chapters SET content=?, word_count=?, ending_tail=?, qc_report=? WHERE id=?"
+  ).bind(cleaned, wc, body.slice(-320), JSON.stringify({ rewrite: true }), ex.id).run();
+  await env.DB.prepare(
+    "DELETE FROM chapters WHERE book_id=? AND chapter_no=? AND id<>?"
+  ).bind(bookId, st.chapterNo, ex.id).run();
+  await M.log(env, { bookId, chapterNo: st.chapterNo, stage: "rewrite", message: `第${st.chapterNo}章已重写覆盖，${wc}字` });
   return { ...st, stage: "complete", title, wc };
 }
 

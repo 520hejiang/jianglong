@@ -182,8 +182,12 @@ export async function api(req: Request, env: Env, ctx: ExecutionContext): Promis
     // ---- 章节 ----
     const mChaps = p.match(/^\/api\/books\/([^/]+)\/chapters$/);
     if (mChaps && req.method === "GET") {
+      // 每个 chapter_no 只取最新版本，避免历史重复版本造成目录重复
       const r = await env.DB.prepare(
-        "SELECT chapter_no,title,word_count,version,status,created_at FROM chapters WHERE book_id=? AND status='done' ORDER BY chapter_no DESC LIMIT 500"
+        `SELECT chapter_no,title,word_count,version,status,created_at FROM chapters c
+         WHERE book_id=? AND status='done'
+           AND version=(SELECT MAX(version) FROM chapters WHERE book_id=c.book_id AND chapter_no=c.chapter_no AND status='done')
+         ORDER BY chapter_no DESC LIMIT 500`
       ).bind(mChaps[1]).all();
       return json(r.results ?? []);
     }
@@ -193,6 +197,16 @@ export async function api(req: Request, env: Env, ctx: ExecutionContext): Promis
         "SELECT * FROM chapters WHERE book_id=? AND chapter_no=? AND status='done' ORDER BY version DESC LIMIT 1"
       ).bind(mChap[1], parseInt(mChap[2], 10)).first();
       return r ? json(r) : err("not found", 404);
+    }
+    // 删除某章（所有版本），并重算总字数
+    if (mChap && req.method === "DELETE") {
+      const bookId = mChap[1]; const no = parseInt(mChap[2], 10);
+      await env.DB.prepare("DELETE FROM chapters WHERE book_id=? AND chapter_no=?").bind(bookId, no).run();
+      const sum = await env.DB.prepare("SELECT COALESCE(SUM(word_count),0) w FROM chapters WHERE book_id=? AND status='done'").bind(bookId).first<{ w: number }>();
+      await env.DB.prepare("UPDATE books SET total_chars=?, updated_at=? WHERE id=?").bind(sum?.w ?? 0, now(), bookId).run();
+      await env.DB.prepare("INSERT INTO logs (id,book_id,chapter_no,level,stage,message,meta,created_at) VALUES (?,?,?,?,?,?,?,?)")
+        .bind(uid(), bookId, no, "warn", "manual", `手动删除第${no}章`, null, now()).run();
+      return json({ ok: true, deleted: no });
     }
 
     // ---- 日志 ----
