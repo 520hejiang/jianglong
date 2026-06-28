@@ -16,12 +16,12 @@ crons = ["*/2 * * * *"]
 [[d1_databases]]
 binding = "DB"
 database_name = "he"
-database_id = "<1d34e00f-c187-4cb8-b0e2-df0a6c8bc3c5>"
+database_id = "1d34e00f-c187-4cb8-b0e2-df0a6c8bc3c5"
 
 # --- KV：运行态开关 / 锁 / 限流计数 / 每日统计 ---
 [[kv_namespaces]]
 binding = "KV"
-id = "<aec17942ebb2417fb77cf0d8e3effc3a>"
+id = "aec17942ebb2417fb77cf0d8e3effc3a"
 
 # --- Queues：异步生成任务，避免请求内一次写完整章导致超限 ---
 [[queues.producers]]
