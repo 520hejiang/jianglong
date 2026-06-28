@@ -17,7 +17,8 @@ async function saveConn() {
   // 先做健康检查 + 鉴权测试，把真实问题暴露出来（而不是"毫无反应"）
   try {
     const h = await fetch(API + "/health").then((r) => r.json());
-    const bad = Object.entries(h).filter(([, v]) => String(v).includes("FAIL"));
+    // 只看真正的状态字段(值以 FAIL 开头)；排除"提示"等帮助文本(其文案里也含 FAIL 字样)
+    const bad = Object.entries(h).filter(([k, v]) => k !== "提示" && String(v).startsWith("FAIL"));
     if (bad.length) { alert("后台自检发现问题，请按教程补齐：\n" + bad.map(([k, v]) => `· ${k}: ${v}`).join("\n")); return; }
   } catch (e) {
     alert("连不上后台！请检查「后台网址」是否填对(应以 .workers.dev 结尾，不要带斜杠)。\n\n技术细节：" + e); return;
