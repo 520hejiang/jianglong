@@ -203,6 +203,19 @@ async function main() {
   ok(fire([mkChar({ realm_index: 4 })], { characters: [{ name: '陆长安', realm_index: 6, status_notes: '闭关' }], foreshadow_new: [], foreshadow_update: [], plot: {} }, baseOpts, 'PLANE_REALM_MISMATCH'), '规则 PLANE_REALM_MISMATCH 拦截未飞升越位面境界');
   ok(fire([mkChar({})], { characters: [{ name: '陆长安', add_movement_arts: [{ name: '神秘瞳术', kind: '' }] }], foreshadow_new: [], foreshadow_update: [], plot: {} }, baseOpts, 'SKILL_NO_SOURCE'), '规则 SKILL_NO_SOURCE 提示身法无出处');
 
+  // ---- Part C: 断点续传(advanceBook)——模拟"每走一步就被掐断"，确认仍能接力完成整章 ----
+  console.log(`\n${C.y}== 断点续传测试（每次只跑一步，模拟被平台掐断后续传）==${C.x}`);
+  const before27 = (await env.DB.prepare("SELECT COUNT(*) c FROM chapters WHERE book_id=?").bind(bookId).first()).c;
+  let status = 'progress', steps = 0;
+  while (status !== 'completed' && steps < 20) {
+    status = await pipeline.advanceBook(env, bookId, 1); // budget=1ms 强制每次只走一步
+    steps++;
+  }
+  const after27 = (await env.DB.prepare("SELECT COUNT(*) c FROM chapters WHERE book_id=?").bind(bookId).first()).c;
+  ok(status === 'completed' && after27 === before27 + 1, '断点续传多次接力后成功产出新一章', `用了 ${steps} 步, 章节数 ${before27}→${after27}`);
+  const genjob = await env.DB.prepare("SELECT value FROM plot_state WHERE book_id=? AND key='__genjob'").bind(bookId).first();
+  ok(!genjob || genjob.value === 'null' || genjob.value === null, '完成后生成存档已清空(不会卡住下一章)');
+
   // ---- 抽样打印一章正文，肉眼看效果 ----
   console.log(`\n${C.y}== 抽样：第 5 章正文前 400 字（看文风/排版/有无AI味）==${C.x}`);
   console.log(C.d + ch5.content.slice(0, 400) + '…' + C.x);

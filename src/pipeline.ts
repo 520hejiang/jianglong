@@ -33,163 +33,205 @@ export interface ChapterResult {
   issues: string[];
 }
 
-export async function generateChapter(env: Env, bookId: string, chapterNo: number, version = 1): Promise<ChapterResult> {
+// 生成阶段（断点续传：每完成一步存档，被掐断也能从断点继续）
+type Stage = "extract" | "outline" | "review" | "draft" | "polish" | "update" | "finalize" | "complete";
+
+export interface GenState {
+  chapterNo: number;
+  version: number;
+  stage: Stage;
+  attempt: number;
+  // 各步产物（存档到 plot_state，跨调用续传）
+  focusJson?: string;
+  memory?: string;
+  openings?: string;
+  lastTail?: string;
+  outlineJson?: string;
+  draft?: string;
+  finalText?: string;
+  deltaJson?: string;
+  issues?: string[];
+  // 完成时回填，供 result 使用
+  title?: string;
+  wc?: number;
+}
+
+const GENJOB_KEY = "__genjob";
+
+// 执行当前阶段的一步，返回推进后的状态。每步只做一次（或极少次）LLM 调用，确保单次调用很短。
+async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState> {
   const c = cfg(env);
   const book = await M.getBook(env, bookId);
   if (!book) throw new Error(`book not found: ${bookId}`);
+  const ch = st.chapterNo;
+  const vol = M.volumeForChapter(book, ch);
+  const volText = vol ? JSON.stringify(vol) : (book.master_outline || "（无卷纲，依据总纲推进）");
+  const stylePrefix = book.style_prompt_override
+    ? `【本书特别文风/设定要求（优先级最高，与下列通用铁律冲突时以此为准）】\n${book.style_prompt_override}\n\n`
+    : "";
+  const chars = await M.loadCharacters(env, bookId);
+  const charMap = new Map(chars.map((x) => [x.name, x]));
+  const fores = await M.openForeshadowing(env, bookId);
+  const planes: Plane[] = book.planes ? safeParse<Plane[]>(book.planes, []) : DEFAULT_PLANES;
+  const currentPlane = book.current_plane || planes[0]?.name || null;
 
-  // 幂等保护：该章该版本若已存在（如锁过期导致重复入队），直接跳过，避免生成重复章节
+  switch (st.stage) {
+    case "extract": {
+      const mainNode = await M.getPlot(env, bookId, "main_node");
+      const exploredMap: string[] = (await M.getPlot(env, bookId, "explored_map")) || [];
+      const last = await M.lastChapter(env, bookId);
+      const baseMem = M.compileMemoryContext({
+        chars, fores, mainNode, exploredMap, relevant: [], currentPlane,
+        lastSummary: last?.summary || "", lastTail: last?.ending_tail || "",
+      });
+      const extractRaw = await chat(env, [
+        { role: "system", content: stylePrefix + fill(await tpl(env, bookId, "extract", PROMPT_EXTRACT), { CH: ch }) },
+        { role: "user", content: fill("【本卷大纲】\n{{VOLUME}}\n\n【当前世界状态】\n{{MEMORY}}", { VOLUME: volText, MEMORY: baseMem }) },
+      ], { temperature: 0.4, maxTokens: 800, json: true });
+      let focus: any = {};
+      try { focus = parseJson(extractRaw.text); } catch { focus = { must_use_entities: [] }; }
+      await M.log(env, { bookId, chapterNo: ch, stage: "extract", message: `focus: ${focus.focus || "-"}`, meta: focus });
+      const relevant = await M.retrieveRelevant(env, bookId, focus.must_use_entities || [], 5);
+      const memory = M.compileMemoryContext({
+        chars, fores, mainNode, exploredMap, relevant, currentPlane,
+        lastSummary: last?.summary || "", lastTail: last?.ending_tail || "",
+      });
+      const ops = await M.recentOpenings(env, bookId, 5);
+      const openings = ops.length ? ops.map((o, i) => `${i + 1}. ${o}…`).join("\n") : "（暂无，本章为靠前章节）";
+      return { ...st, stage: "outline", focusJson: JSON.stringify(focus), memory, openings, lastTail: last?.ending_tail || "" };
+    }
+    case "outline": {
+      const outline = await genOutline(env, bookId, ch, volText, st.memory!, st.focusJson!, c, stylePrefix);
+      return { ...st, stage: "review", outlineJson: JSON.stringify(outline) };
+    }
+    case "review": {
+      let outline = JSON.parse(st.outlineJson!) as ChapterOutline;
+      const overdue = fores.filter((f) => f.due_ch && ch > f.due_ch)
+        .map((f) => `「${f.title}」(建议第${f.due_ch}章前)`).join("；") || "（无）";
+      for (let i = 0; i < c.maxReviewLoop; i++) {
+        const reviewRaw = await chat(env, [
+          { role: "system", content: stylePrefix + fill(await tpl(env, bookId, "review", PROMPT_REVIEW), { CH: ch }) },
+          { role: "user", content: fill("【待审细纲】\n{{OUTLINE}}\n\n【当前世界状态】\n{{MEMORY}}\n\n【超期伏笔提醒】\n{{OVERDUE}}",
+              { OUTLINE: JSON.stringify(outline), MEMORY: st.memory!, OVERDUE: overdue }) },
+        ], { temperature: 0.3, maxTokens: 2000, json: true });
+        let review: any;
+        try { review = parseJson(reviewRaw.text); } catch { break; }
+        if (review.approved) break;
+        await M.log(env, { bookId, chapterNo: ch, level: "warn", stage: "review", message: `细纲打回: ${(review.issues || []).join("; ")}` });
+        if (review.revised_outline) outline = review.revised_outline as ChapterOutline;
+      }
+      return { ...st, stage: "draft", outlineJson: JSON.stringify(outline) };
+    }
+    case "draft": {
+      const outline = JSON.parse(st.outlineJson!) as ChapterOutline;
+      const draft = await genDraft(env, bookId, ch, outline, st.memory!, st.lastTail || "", c, stylePrefix, st.openings || "");
+      return { ...st, stage: "polish", draft };
+    }
+    case "polish": {
+      const slop = detectSlop(st.draft!);
+      const needPolish = c.polishMode === "always" || (c.polishMode === "auto" && (slop.hit || st.attempt > 0));
+      let finalText = st.draft!;
+      if (needPolish) {
+        if (slop.hit) await M.log(env, { bookId, chapterNo: ch, stage: "polish", message: `触发润色去AI味: ${slop.reasons.join("；")}` });
+        finalText = await polish(env, bookId, ch, st.draft!, st.memory!, c, stylePrefix);
+      }
+      return { ...st, stage: "update", finalText };
+    }
+    case "update": {
+      const delta = await extractDelta(env, bookId, ch, st.finalText!, st.memory!, stylePrefix);
+      const issues = validateDelta(charMap, delta, fores, {
+        chapterNo: ch, planes, currentPlane,
+        minBreakthroughGap: c.minBreakthroughGap, assetSurgeFactor: c.assetSurgeFactor,
+      });
+      const issuesText = issues.map((x) => `[${x.level}] ${x.rule}: ${x.detail}`);
+      if (hasBlocking(issues) && st.attempt < c.maxRewrite - 1) {
+        await M.log(env, { bookId, chapterNo: ch, level: "warn", stage: "update", message: `质检未过(尝试${st.attempt + 1})，回炉重写: ${formatIssues(issues)}` });
+        // 回到 draft 重写，把违规反馈并入 memory
+        return { ...st, stage: "draft", attempt: st.attempt + 1, memory: st.memory! + `\n\n【上一次生成违反了以下硬规则，本次务必修正】\n${formatIssues(issues)}` };
+      }
+      return { ...st, stage: "finalize", deltaJson: JSON.stringify(delta), issues: issuesText };
+    }
+    case "finalize": {
+      const delta = JSON.parse(st.deltaJson!) as StateDelta;
+      const outline = JSON.parse(st.outlineJson!) as ChapterOutline;
+      const title = outline.title || `第${ch}章`;
+      const body = normalizeText(stripLeadingTitle(st.finalText!));
+      const cleaned = `第${ch}章 ${title}\n\n${body}`;
+      const wc = body.replace(/\s/g, "").length;
+      const issuesText = [...(st.issues || [])];
+      if (wc < Math.floor(c.charsMin * 0.7)) issuesText.push(`[warn] LENGTH: 本章仅 ${wc} 字，短于目标下限 ${c.charsMin}`);
+      else if (wc > Math.ceil(c.charsMax * 1.6)) issuesText.push(`[warn] LENGTH: 本章 ${wc} 字，明显超出目标上限 ${c.charsMax}`);
+
+      await M.saveChapter(env, bookId, {
+        chapter_no: ch, title, outline: JSON.stringify(outline), content: cleaned,
+        summary: delta.summary || "", ending_tail: body.slice(-320), tags: delta.tags || [],
+        word_count: wc, version: st.version, qc_report: JSON.stringify({ issues: issuesText }),
+      });
+      await applyDelta(env, bookId, ch, delta, charMap);
+
+      // 仅"向前生成"时推进 next_chapter；重写旧章不推进
+      if (ch === book.next_chapter) {
+        await env.DB.prepare(
+          "UPDATE books SET next_chapter=?, total_chars=total_chars+?, cursor_volume=?, updated_at=? WHERE id=?"
+        ).bind(ch + 1, wc, vol?.vol ?? book.cursor_volume, Date.now(), bookId).run();
+      }
+      if (book.target_chapters && ch >= book.target_chapters) await M.setBookStatus(env, bookId, "finished");
+      await M.log(env, { bookId, chapterNo: ch, stage: "update", message: `第${ch}章完成，${wc}字`, meta: { wc, issues: issuesText } });
+      return { ...st, stage: "complete", title, wc, issues: issuesText };
+    }
+    default:
+      return { ...st, stage: "complete" };
+  }
+}
+
+// 一口气生成一章（用于测试 / 付费队列等执行时长充足的环境）
+export async function generateChapter(env: Env, bookId: string, chapterNo: number, version = 1): Promise<ChapterResult> {
   const dup = await env.DB.prepare(
     "SELECT 1 FROM chapters WHERE book_id=? AND chapter_no=? AND version=? AND status='done' LIMIT 1"
   ).bind(bookId, chapterNo, version).first();
   if (dup) {
-    await M.log(env, { bookId, chapterNo, stage: "queue", message: `第${chapterNo}章(v${version})已存在，跳过重复生成` });
+    await M.log(env, { bookId, chapterNo, stage: "queue", message: `第${chapterNo}章(v${version})已存在，跳过` });
     return { chapterNo, title: "(已存在)", wordCount: 0, issues: [] };
   }
+  let st: GenState = { chapterNo, version, stage: "extract", attempt: 0 };
+  let guard = 0;
+  while (st.stage !== "complete" && guard++ < 40) st = await runStep(env, bookId, st);
+  return { chapterNo, title: st.title || `第${chapterNo}章`, wordCount: st.wc || 0, issues: st.issues || [] };
+}
 
-  const vol = M.volumeForChapter(book, chapterNo);
-  const volText = vol ? JSON.stringify(vol) : (book.master_outline || "（无卷纲，依据总纲推进）");
-
-  // 本书自定义文风（向导/控制台可设），优先级最高，叠加在通用铁律之上
-  const stylePrefix = book.style_prompt_override
-    ? `【本书特别文风/设定要求（优先级最高，与下列通用铁律冲突时以此为准）】\n${book.style_prompt_override}\n\n`
-    : "";
-
-  // ---------- 0. 读取记忆，编译上下文 ----------
-  const chars = await M.loadCharacters(env, bookId);
-  const fores = await M.openForeshadowing(env, bookId);
-  const mainNode = await M.getPlot(env, bookId, "main_node");
-  const exploredMap: string[] = (await M.getPlot(env, bookId, "explored_map")) || [];
-  const last = await M.lastChapter(env, bookId);
-
-  const charMap = new Map(chars.map((x) => [x.name, x]));
-  const planes: Plane[] = book.planes ? safeParse<Plane[]>(book.planes, []) : DEFAULT_PLANES;
-  const currentPlane = book.current_plane || planes[0]?.name || null;
-
-  // ---------- 1. 焦点提取 ----------
-  const baseMemoryNoRetrieval = M.compileMemoryContext({
-    chars, fores, mainNode, exploredMap, relevant: [], currentPlane,
-    lastSummary: last?.summary || "", lastTail: last?.ending_tail || "",
-  });
-
-  const extractRaw = await chat(env, [
-    { role: "system", content: stylePrefix + fill(await tpl(env, bookId, "extract", PROMPT_EXTRACT), { CH: chapterNo }) },
-    { role: "user", content: fill("【本卷大纲】\n{{VOLUME}}\n\n【当前世界状态】\n{{MEMORY}}", { VOLUME: volText, MEMORY: baseMemoryNoRetrieval }) },
-  ], { temperature: 0.4, maxTokens: 800, json: true });
-
-  let focus: any = {};
-  try { focus = parseJson(extractRaw.text); } catch { focus = { must_use_entities: [] }; }
-  await M.log(env, { bookId, chapterNo, stage: "extract", message: `focus: ${focus.focus || "-"}`, meta: focus });
-
-  // 基于焦点实体做"无 Vectorize 的记忆检索"
-  const relevant = await M.retrieveRelevant(env, bookId, focus.must_use_entities || [], 5);
-  let memory = M.compileMemoryContext({
-    chars, fores, mainNode, exploredMap, relevant, currentPlane,
-    lastSummary: last?.summary || "", lastTail: last?.ending_tail || "",
-  });
-
-  // ---------- 2. 单章细纲 ----------
-  let outline = await genOutline(env, bookId, chapterNo, volText, memory, JSON.stringify(focus), c, stylePrefix);
-
-  // ---------- 3. 审核（最多打回 maxReviewLoop 次） ----------
-  const overdue = fores.filter((f) => f.due_ch && chapterNo > f.due_ch)
-    .map((f) => `「${f.title}」(建议第${f.due_ch}章前)`).join("；") || "（无）";
-
-  for (let i = 0; i < c.maxReviewLoop; i++) {
-    const reviewRaw = await chat(env, [
-      { role: "system", content: stylePrefix + fill(await tpl(env, bookId, "review", PROMPT_REVIEW), { CH: chapterNo }) },
-      { role: "user", content: fill("【待审细纲】\n{{OUTLINE}}\n\n【当前世界状态】\n{{MEMORY}}\n\n【超期伏笔提醒】\n{{OVERDUE}}",
-          { OUTLINE: JSON.stringify(outline), MEMORY: memory, OVERDUE: overdue }) },
-    ], { temperature: 0.3, maxTokens: 2000, json: true });
-    let review: any;
-    try { review = parseJson(reviewRaw.text); } catch { break; }
-    if (review.approved) break;
-    await M.log(env, { bookId, chapterNo, level: "warn", stage: "review", message: `细纲打回: ${(review.issues || []).join("; ")}` });
-    if (review.revised_outline) outline = review.revised_outline as ChapterOutline;
-  }
-
-  // ---------- 4. 正文生成 + 5. 按需润色 + 硬校验（不过则重写） ----------
-  // 最近章节开头，喂给 draft 以根治"每章开头雷同"
-  const openings = await M.recentOpenings(env, bookId, 5);
-  const openingsText = openings.length ? openings.map((o, i) => `${i + 1}. ${o}…`).join("\n") : "（暂无，本章为靠前章节）";
-
-  let finalText = "";
-  let delta: StateDelta | null = null;
-  let issuesText: string[] = [];
-
-  for (let attempt = 0; attempt < c.maxRewrite; attempt++) {
-    const draft = await genDraft(env, bookId, chapterNo, outline, memory, last?.ending_tail || "", c, stylePrefix, openingsText);
-
-    // 按需润色：always 恒润；auto 仅在检出AI味/正在重写时润；off 从不润 —— 省钱又不丢质量
-    const slop = detectSlop(draft);
-    const needPolish = c.polishMode === "always" || (c.polishMode === "auto" && (slop.hit || attempt > 0));
-    if (needPolish) {
-      if (slop.hit) await M.log(env, { bookId, chapterNo, stage: "polish", message: `触发润色去AI味: ${slop.reasons.join("；")}` });
-      finalText = await polish(env, bookId, chapterNo, draft, memory, c, stylePrefix);
-    } else {
-      finalText = draft;
+/**
+ * 断点续传式推进一本书（免费计划 / Cron 用）：在 budgetMs 时间预算内尽量多走几步，
+ * 每完成一步就存档到 plot_state。被平台掐断也只丢失正在进行的那一步，下次从断点续。
+ * @returns "completed" 完成一章 | "progress" 推进了但未完 | "idle" 没活干/被锁
+ */
+export async function advanceBook(env: Env, bookId: string, budgetMs = 18000): Promise<"completed" | "progress" | "idle"> {
+  const start = Date.now();
+  const got = await M.acquireLock(env, bookId, 120); // 短锁：被掐断后 2 分钟内自动解开续传
+  if (!got) return "idle";
+  try {
+    const book = await M.getBook(env, bookId);
+    if (!book || book.status !== "running") return "idle";
+    if (book.target_chapters && book.next_chapter > book.target_chapters) {
+      await M.setBookStatus(env, bookId, "finished");
+      return "idle";
     }
-
-    // 抽取状态增量
-    delta = await extractDelta(env, bookId, chapterNo, finalText, memory, stylePrefix);
-
-    // 硬规则校验（含突破节奏 / 位面一致 / 家底 / 身法出处）
-    const issues = validateDelta(charMap, delta, fores, {
-      chapterNo, planes, currentPlane,
-      minBreakthroughGap: c.minBreakthroughGap,
-      assetSurgeFactor: c.assetSurgeFactor,
-    });
-    issuesText = issues.map((x) => `[${x.level}] ${x.rule}: ${x.detail}`);
-    if (!hasBlocking(issues)) break;
-
-    await M.log(env, { bookId, chapterNo, level: "warn", stage: "polish",
-      message: `质检未过(尝试${attempt + 1}): ${formatIssues(issues)}` });
-    // 把违规反馈进 memory，提示下一次重写规避
-    memory += `\n\n【上一次生成违反了以下硬规则，本次务必修正】\n${formatIssues(issues)}`;
+    let st = (await M.getPlot(env, bookId, GENJOB_KEY)) as GenState | null;
+    if (!st || !st.stage) {
+      st = { chapterNo: book.next_chapter, version: 1, stage: "extract", attempt: 0 };
+      await M.setPlot(env, bookId, GENJOB_KEY, st);
+    }
+    while (st.stage !== "complete" && Date.now() - start < budgetMs) {
+      st = await runStep(env, bookId, st);
+      await M.setPlot(env, bookId, GENJOB_KEY, st); // 每步存档
+    }
+    if (st.stage === "complete") {
+      await M.setPlot(env, bookId, GENJOB_KEY, null); // 清空，下次开新章
+      return "completed";
+    }
+    return "progress";
+  } finally {
+    await M.releaseLock(env, bookId);
   }
-
-  if (!delta) throw new Error("delta 抽取失败");
-
-  // ---------- 6. 更新记忆库（落库 + 应用增量） ----------
-  // 去掉模型自带的标题行，统一由系统拼一个规范标题，避免"标题重复"
-  const title = outline.title || `第${chapterNo}章`;
-  const body = normalizeText(stripLeadingTitle(finalText));
-  const cleaned = `第${chapterNo}章 ${title}\n\n${body}`;
-  const wc = body.replace(/\s/g, "").length;
-
-  // 篇幅体检：明显过短/过长不算"崩"，但要在质检报告与 TG 里提示，便于你盯质量
-  if (wc < Math.floor(c.charsMin * 0.7)) issuesText.push(`[warn] LENGTH: 本章仅 ${wc} 字，短于目标下限 ${c.charsMin}`);
-  else if (wc > Math.ceil(c.charsMax * 1.6)) issuesText.push(`[warn] LENGTH: 本章 ${wc} 字，明显超出目标上限 ${c.charsMax}`);
-
-  await M.saveChapter(env, bookId, {
-    chapter_no: chapterNo,
-    title,
-    outline: JSON.stringify(outline),
-    content: cleaned,
-    summary: delta.summary || "",
-    ending_tail: body.slice(-320),
-    tags: delta.tags || [],
-    word_count: wc,
-    version,
-    qc_report: JSON.stringify({ issues: issuesText }),
-  });
-
-  await applyDelta(env, bookId, chapterNo, delta, charMap);
-
-  // 推进 book 进度
-  await env.DB.prepare(
-    "UPDATE books SET next_chapter=?, total_chars=total_chars+?, cursor_volume=?, updated_at=? WHERE id=?"
-  ).bind(chapterNo + 1, wc, vol?.vol ?? book.cursor_volume, Date.now(), bookId).run();
-
-  // 是否完结
-  if (book.target_chapters && chapterNo >= book.target_chapters) {
-    await M.setBookStatus(env, bookId, "finished");
-  }
-
-  await M.log(env, { bookId, chapterNo, stage: "update", message: `第${chapterNo}章完成，${wc}字`,
-    meta: { wc, issues: issuesText } });
-
-  return { chapterNo, title: outline.title || title, wordCount: wc, issues: issuesText };
 }
 
 // ---------------- 各阶段封装 ----------------
