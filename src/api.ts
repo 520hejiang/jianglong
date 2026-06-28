@@ -43,10 +43,11 @@ export async function api(req: Request, env: Env, ctx: ExecutionContext): Promis
       const id = uid();
       await env.DB.prepare(
         `INSERT INTO books (id,title,status,master_outline,volume_outline,core_settings,power_system,
-         next_chapter,target_chapters,total_chars,cursor_volume,created_at,updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,0,0,?,?)`
+         style_prompt_override,next_chapter,target_chapters,total_chars,cursor_volume,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,0,0,?,?)`
       ).bind(id, b.title || "未命名", "paused", b.master_outline ?? "", b.volume_outline ?? "[]",
-        b.core_settings ?? "", b.power_system ?? "", b.start_chapter ?? 1, b.target_chapters ?? 800, now(), now()).run();
+        b.core_settings ?? "", b.power_system ?? "", b.style_prompt_override ?? "",
+        b.start_chapter ?? 1, b.target_chapters ?? 800, now(), now()).run();
       return json({ id });
     }
     const mBook = p.match(/^\/api\/books\/([^/]+)$/);

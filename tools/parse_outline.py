@@ -216,12 +216,16 @@ def parse(text: str, title=None, target_chapters=800, start_chapter=1):
         "core_settings": "",
         "power_system": "",
         "volume_outline": "[]",
+        "style_prompt_override": "",
         "characters": [],
     }
     extra_settings = []
     for t, body in sections:
-        low = t.lower()
-        if re.search(r"总纲|主线|梗概|master", t, re.I):
+        if re.search(r"书名|title", t, re.I) and not body.strip():
+            continue
+        if re.search(r"文风|风格|文笔|style", t, re.I):
+            book["style_prompt_override"] = body
+        elif re.search(r"总纲|主线|梗概|master", t, re.I):
             book["master_outline"] = body
         elif re.search(r"分卷|卷纲|volume|章节大纲", t, re.I):
             book["volume_outline"] = json.dumps(parse_volumes(body), ensure_ascii=False)
