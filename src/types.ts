@@ -5,7 +5,7 @@
 export interface Env {
   DB: D1Database;
   KV: KVNamespace;
-  GEN_QUEUE: Queue<GenJob>;
+  GEN_QUEUE?: Queue<GenJob>; // 可选：仅在付费计划开启 Queues 时绑定；无则走 Cron 内联生成
   // vars
   DEEPSEEK_MODEL: string;
   DEEPSEEK_BASE_URL: string;

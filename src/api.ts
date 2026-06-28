@@ -8,6 +8,7 @@
 //   生成：手动触发一章 / 重写某章
 // ============================================================================
 import type { Env } from "./types";
+import { dispatchChapter } from "./jobs";
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json", ...cors() } });
@@ -78,7 +79,7 @@ export async function api(req: Request, env: Env, ctx: ExecutionContext): Promis
       // start 时立即入队一章，不必等下一次 cron
       if (act === "start") {
         const b = await env.DB.prepare("SELECT next_chapter FROM books WHERE id=?").bind(id).first<{ next_chapter: number }>();
-        if (b) await env.GEN_QUEUE.send({ bookId: id, chapterNo: b.next_chapter, reason: "manual" });
+        if (b) await dispatchChapter(env, ctx, { bookId: id, chapterNo: b.next_chapter, reason: "manual" });
       }
       return json({ ok: true });
     }
@@ -91,7 +92,7 @@ export async function api(req: Request, env: Env, ctx: ExecutionContext): Promis
       const b = await env.DB.prepare("SELECT next_chapter FROM books WHERE id=?").bind(id).first<{ next_chapter: number }>();
       if (!b) return err("not found", 404);
       const ch = body.chapter ?? b.next_chapter;
-      await env.GEN_QUEUE.send({ bookId: id, chapterNo: ch, reason: body.rewrite ? "rewrite" : "manual" });
+      await dispatchChapter(env, ctx, { bookId: id, chapterNo: ch, reason: body.rewrite ? "rewrite" : "manual" });
       return json({ ok: true, queued: ch });
     }
 
