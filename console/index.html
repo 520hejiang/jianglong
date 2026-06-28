@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>修仙小说生成控制台</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <header>
+    <h1>📜 修仙小说生成控制台</h1>
+    <div class="conn">
+      <input id="apiBase" placeholder="Worker API 地址，如 https://novel-engine.xxx.workers.dev" />
+      <input id="token" type="password" placeholder="ADMIN_TOKEN" />
+      <button onclick="saveConn()">连接</button>
+    </div>
+  </header>
+
+  <nav>
+    <button data-tab="books" class="active">书架</button>
+    <button data-tab="chapters">章节</button>
+    <button data-tab="memory">记忆库</button>
+    <button data-tab="prompts">Prompt</button>
+    <button data-tab="logs">日志</button>
+  </nav>
+
+  <main>
+    <!-- 书架 -->
+    <section id="tab-books" class="tab active">
+      <div class="row">
+        <button onclick="loadBooks()">刷新</button>
+        <button onclick="showNewBook()">+ 新建书 / 导入大纲</button>
+      </div>
+      <div id="bookList"></div>
+
+      <dialog id="newBookDlg">
+        <h3>新建书 · 导入大纲与设定</h3>
+        <label>书名 <input id="nb_title" /></label>
+        <label>起始章 <input id="nb_start" type="number" value="1" /></label>
+        <label>目标章数 <input id="nb_target" type="number" value="800" /></label>
+        <label>总纲<textarea id="nb_master" rows="4" placeholder="整本书的总纲"></textarea></label>
+        <label>核心设定集<textarea id="nb_settings" rows="4" placeholder="世界观/势力/地理/历法/境界体系说明"></textarea></label>
+        <label>境界体系 power_system (JSON)<textarea id="nb_power" rows="3" placeholder='留空则用默认凡人流境界'></textarea></label>
+        <label>分卷大纲 volume_outline (JSON 数组)<textarea id="nb_vol" rows="6" placeholder='[{"vol":1,"title":"山村少年","start_ch":1,"end_ch":60,"summary":"...","key_events":["..."]}]'></textarea></label>
+        <div class="row">
+          <button onclick="createBook()">创建</button>
+          <button onclick="newBookDlg.close()">取消</button>
+        </div>
+      </dialog>
+    </section>
+
+    <!-- 章节 -->
+    <section id="tab-chapters" class="tab">
+      <div class="row">
+        <select id="chBook" onchange="loadChapters()"></select>
+        <button onclick="loadChapters()">刷新</button>
+      </div>
+      <div class="split">
+        <div id="chapterList" class="list"></div>
+        <div id="chapterView" class="reader">
+          <div class="reader-bar">
+            <button id="copyBtn" onclick="copyChapter()">📋 一键复制本章</button>
+            <button onclick="rewriteCurrent()">♻️ 重写本章</button>
+          </div>
+          <pre id="chapterText"></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- 记忆库 -->
+    <section id="tab-memory" class="tab">
+      <div class="row">
+        <select id="memBook" onchange="loadMemory()"></select>
+        <button onclick="loadMemory()">刷新</button>
+        <span class="hint">可直接修改角色生死/境界以人工防崩</span>
+      </div>
+      <h4>角色状态</h4>
+      <div id="charList"></div>
+      <h4>未了结伏笔</h4>
+      <div id="foreList"></div>
+      <h4>剧情状态</h4>
+      <pre id="plotView"></pre>
+    </section>
+
+    <!-- Prompt -->
+    <section id="tab-prompts" class="tab">
+      <p class="hint">覆盖默认模板（留空则用代码内置）。name: extract / outline / review / draft / polish / update</p>
+      <label>scope
+        <select id="pr_scope"><option value="global">global(全局)</option><option value="book">book(单书)</option></select>
+      </label>
+      <label>book_id（scope=book 时填）<input id="pr_book" /></label>
+      <label>name <input id="pr_name" placeholder="draft" /></label>
+      <label>模板内容<textarea id="pr_tpl" rows="12"></textarea></label>
+      <button onclick="savePrompt()">保存覆盖</button>
+      <div id="promptList"></div>
+    </section>
+
+    <!-- 日志 -->
+    <section id="tab-logs" class="tab">
+      <div class="row">
+        <select id="logBook" onchange="loadLogs()"></select>
+        <button onclick="loadLogs()">刷新</button>
+      </div>
+      <div id="logList"></div>
+    </section>
+  </main>
+  <script src="./app.js"></script>
+</body>
+</html>

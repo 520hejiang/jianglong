@@ -1,0 +1,50 @@
+# ============================================================================
+# Cloudflare Workers 配置 —— 全自动修仙小说生成系统
+# 全部使用 Free Plan 可用组件：Workers / D1 / KV / Queues / Cron Triggers
+# ============================================================================
+name = "novel-engine"
+main = "src/index.ts"
+compatibility_date = "2024-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+# --- Cron 定时触发：每 2 分钟巡检一次，把处于 running 状态的书推进一章 ---
+# 注意：LLM 调用属于 I/O 等待，不计入 CPU 时间，因此不会触发 Free Plan 的 CPU 上限。
+[triggers]
+crons = ["*/2 * * * *"]
+
+# --- D1 关系型数据库：存书、章节正文、角色状态、剧情状态、伏笔、日志 ---
+[[d1_databases]]
+binding = "DB"
+database_name = "novel_db"
+database_id = "<在 dashboard 创建后填入>"
+
+# --- KV：运行态开关 / 锁 / 限流计数 / 每日统计 ---
+[[kv_namespaces]]
+binding = "KV"
+id = "<在 dashboard 创建后填入>"
+
+# --- Queues：异步生成任务，避免请求内一次写完整章导致超限 ---
+[[queues.producers]]
+binding = "GEN_QUEUE"
+queue = "chapter-gen"
+
+[[queues.consumers]]
+queue = "chapter-gen"
+max_batch_size = 1          # 一次只处理一章，保证顺序与状态一致性
+max_concurrency = 2         # 多本书可并发（每本同一时刻仍只跑一章）
+max_retries = 2
+dead_letter_queue = "chapter-gen-dlq"
+
+# --- 普通变量（非机密）。机密用 `wrangler secret put` 注入 ---
+[vars]
+DEEPSEEK_MODEL = "deepseek-v4-flash"
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+TARGET_CHARS_MIN = "2500"
+TARGET_CHARS_MAX = "3000"
+MAX_CONTEXT_TOKENS = "60000"   # 按官方最大上下文留余量，可在 dashboard 调整
+
+# 需要用 secret 注入的机密（不要写在这里）：
+#   wrangler secret put DEEPSEEK_API_KEY
+#   wrangler secret put TELEGRAM_BOT_TOKEN
+#   wrangler secret put TELEGRAM_CHAT_ID
+#   wrangler secret put ADMIN_TOKEN        # 控制台登录口令
