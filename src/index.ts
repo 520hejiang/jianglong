@@ -25,7 +25,7 @@ export default {
   async queue(batch: MessageBatch<GenJob>, env: Env, _ctx: ExecutionContext): Promise<void> {
     for (const msg of batch.messages) {
       const job = msg.body;
-      const got = await M.acquireLock(env, job.bookId, 600);
+      const got = await M.acquireLock(env, job.bookId, 1500); // 25min，覆盖慢章生成，配合幂等保护防重复
       if (!got) { msg.ack(); continue; } // 该书正有一章在跑，跳过
       try {
         const book = await M.getBook(env, job.bookId);

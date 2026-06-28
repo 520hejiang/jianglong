@@ -233,7 +233,8 @@ async function loadChapters() {
 async function openChapter(bookId, no) {
   const c = await call(`/api/books/${bookId}/chapters/${no}`);
   curChapter = { bookId, chapter_no: no };
-  document.getElementById("chapterText").textContent = `第${c.chapter_no}章 ${c.title}\n\n${c.content}`;
+  // content 已自带规范标题行，直接展示，避免标题重复
+  document.getElementById("chapterText").textContent = c.content;
 }
 function copyChapter() {
   const t = document.getElementById("chapterText").textContent;
@@ -250,22 +251,45 @@ async function rewriteCurrent() {
 }
 
 // ---- 记忆库 ----
+const _assetCache = {}; // cid -> assets 对象，供 saveChar 合并灵石用
+function pj(s, fb) { try { return typeof s === "string" ? JSON.parse(s) : (s ?? fb); } catch { return fb; } }
+function fmtAssets(a) {
+  const pills = (a.pills||[]).map(x=>`${x.name}×${x.count}`).join("、");
+  const mats = (a.materials||[]).map(x=>`${x.name}×${x.count}`).join("、");
+  return [pills && "丹:"+pills, mats && "材:"+mats].filter(Boolean).join(" ｜ ") || "—";
+}
 async function loadMemory() {
   const id = document.getElementById("memBook").value; if (!id) return;
-  const [chars, fores, plot] = await Promise.all([
-    call(`/api/books/${id}/characters`), call(`/api/books/${id}/foreshadowing`), call(`/api/books/${id}/plot`),
+  const [book, chars, fores, plot] = await Promise.all([
+    call(`/api/books/${id}`), call(`/api/books/${id}/characters`),
+    call(`/api/books/${id}/foreshadowing`), call(`/api/books/${id}/plot`),
   ]);
+  // 位面横幅
+  const planes = pj(book.planes, []);
+  document.getElementById("planeBanner").innerHTML = planes.length
+    ? `当前位面：<b>${esc(book.current_plane||planes[0].name)}</b>　｜　位面表：${planes.map(p=>`${esc(p.name)}(序${p.min_realm}-${p.max_realm})`).join("、")}`
+    : "（本书未设位面）";
+
   document.getElementById("charList").innerHTML = `<table>
-    <tr><th>名</th><th>身份</th><th>存活</th><th>境界序</th><th>境界名</th><th>层</th><th>近况</th><th></th></tr>
-    ${chars.map((c) => `<tr>
+    <tr><th>名</th><th>身份</th><th>存活</th><th>境界序</th><th>境界名</th><th>层</th><th>灵石</th><th>身法/神通</th><th>法宝</th><th>家底</th><th>近况</th><th></th></tr>
+    ${chars.map((c) => {
+      const assets = pj(c.assets, {spirit_stones:0,pills:[],materials:[],misc:[]});
+      _assetCache[c.id] = assets;
+      const moves = pj(c.movement_arts, []).map(m=>`${m.name}[${m.kind||"?"}]`).join("、") || "—";
+      const arts = pj(c.artifacts, []).map(a=>`${a.name}(耐久${a.durability??"?"})`).join("、") || "—";
+      return `<tr>
       <td>${esc(c.name)}</td><td>${c.role}</td>
       <td><input type="checkbox" ${c.alive?"checked":""} id="al_${c.id}"></td>
-      <td><input style="width:50px" id="ri_${c.id}" value="${c.realm_index}"></td>
-      <td><input style="width:70px" id="rn_${c.id}" value="${esc(c.realm_name||"")}"></td>
-      <td><input style="width:45px" id="rs_${c.id}" value="${c.realm_sub||0}"></td>
-      <td><input style="width:200px" id="sn_${c.id}" value="${esc(c.status_notes||"")}"></td>
+      <td><input style="width:46px" id="ri_${c.id}" value="${c.realm_index}"></td>
+      <td><input style="width:64px" id="rn_${c.id}" value="${esc(c.realm_name||"")}"></td>
+      <td><input style="width:40px" id="rs_${c.id}" value="${c.realm_sub||0}"></td>
+      <td><input style="width:80px" id="ss_${c.id}" value="${assets.spirit_stones||0}"></td>
+      <td class="hint" title="${esc(moves)}">${esc(moves.slice(0,28))}</td>
+      <td class="hint" title="${esc(arts)}">${esc(arts.slice(0,28))}</td>
+      <td class="hint" title="${esc(fmtAssets(assets))}">${esc(fmtAssets(assets).slice(0,28))}</td>
+      <td><input style="width:160px" id="sn_${c.id}" value="${esc(c.status_notes||"")}"></td>
       <td><button onclick="saveChar('${c.id}')">存</button></td>
-    </tr>`).join("")}
+    </tr>`;}).join("")}
   </table>`;
   document.getElementById("foreList").innerHTML = `<table>
     <tr><th>状态</th><th>重要</th><th>埋/建议回收</th><th>标题</th></tr>
@@ -274,12 +298,15 @@ async function loadMemory() {
   document.getElementById("plotView").textContent = plot.map((p)=>`${p.key}: ${p.value}`).join("\n");
 }
 async function saveChar(cid) {
+  const assets = _assetCache[cid] || {spirit_stones:0,pills:[],materials:[],misc:[]};
+  assets.spirit_stones = +document.getElementById("ss_"+cid).value || 0; // 手动修正灵石，保留丹药/材料
   const body = {
     alive: document.getElementById("al_"+cid).checked,
     realm_index: +document.getElementById("ri_"+cid).value,
     realm_name: document.getElementById("rn_"+cid).value,
     realm_sub: +document.getElementById("rs_"+cid).value,
     status_notes: document.getElementById("sn_"+cid).value,
+    assets,
   };
   await call(`/api/characters/${cid}`, { method: "PUT", body: JSON.stringify(body) });
   alert("已保存");

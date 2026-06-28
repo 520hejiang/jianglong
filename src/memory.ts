@@ -136,7 +136,7 @@ export async function lastChapter(env: Env, bookId: string): Promise<any | null>
 export async function retrieveRelevant(env: Env, bookId: string, tags: string[], limit = 5): Promise<{ chapter_no: number; summary: string }[]> {
   if (!tags.length) return [];
   const r = await env.DB.prepare(
-    "SELECT chapter_no, summary, tags FROM chapters WHERE book_id=? AND status='done' ORDER BY chapter_no DESC LIMIT 200"
+    "SELECT chapter_no, summary, tags FROM chapters WHERE book_id=? AND status='done' ORDER BY chapter_no DESC LIMIT 400"
   ).bind(bookId).all<any>();
   const scored = (r.results ?? []).map((row) => {
     const t: string[] = safeArr(row.tags);

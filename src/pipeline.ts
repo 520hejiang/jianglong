@@ -37,6 +37,16 @@ export async function generateChapter(env: Env, bookId: string, chapterNo: numbe
   const c = cfg(env);
   const book = await M.getBook(env, bookId);
   if (!book) throw new Error(`book not found: ${bookId}`);
+
+  // 幂等保护：该章该版本若已存在（如锁过期导致重复入队），直接跳过，避免生成重复章节
+  const dup = await env.DB.prepare(
+    "SELECT 1 FROM chapters WHERE book_id=? AND chapter_no=? AND version=? AND status='done' LIMIT 1"
+  ).bind(bookId, chapterNo, version).first();
+  if (dup) {
+    await M.log(env, { bookId, chapterNo, stage: "queue", message: `第${chapterNo}章(v${version})已存在，跳过重复生成` });
+    return { chapterNo, title: "(已存在)", wordCount: 0, issues: [] };
+  }
+
   const vol = M.volumeForChapter(book, chapterNo);
   const volText = vol ? JSON.stringify(vol) : (book.master_outline || "（无卷纲，依据总纲推进）");
 
@@ -128,17 +138,23 @@ export async function generateChapter(env: Env, bookId: string, chapterNo: numbe
   if (!delta) throw new Error("delta 抽取失败");
 
   // ---------- 6. 更新记忆库（落库 + 应用增量） ----------
-  const cleaned = normalizeText(finalText);
-  const title = (focus && outline?.title) || `第${chapterNo}章`;
-  const wc = cleaned.replace(/\s/g, "").length;
+  // 去掉模型自带的标题行，统一由系统拼一个规范标题，避免"标题重复"
+  const title = outline.title || `第${chapterNo}章`;
+  const body = normalizeText(stripLeadingTitle(finalText));
+  const cleaned = `第${chapterNo}章 ${title}\n\n${body}`;
+  const wc = body.replace(/\s/g, "").length;
+
+  // 篇幅体检：明显过短/过长不算"崩"，但要在质检报告与 TG 里提示，便于你盯质量
+  if (wc < Math.floor(c.charsMin * 0.7)) issuesText.push(`[warn] LENGTH: 本章仅 ${wc} 字，短于目标下限 ${c.charsMin}`);
+  else if (wc > Math.ceil(c.charsMax * 1.6)) issuesText.push(`[warn] LENGTH: 本章 ${wc} 字，明显超出目标上限 ${c.charsMax}`);
 
   await M.saveChapter(env, bookId, {
     chapter_no: chapterNo,
-    title: outline.title || `第${chapterNo}章`,
+    title,
     outline: JSON.stringify(outline),
     content: cleaned,
     summary: delta.summary || "",
-    ending_tail: cleaned.slice(-320),
+    ending_tail: body.slice(-320),
     tags: delta.tags || [],
     word_count: wc,
     version,
@@ -251,6 +267,17 @@ async function applyDelta(env: Env, bookId: string, ch: number, d: StateDelta, b
     const cur: string[] = (await M.getPlot(env, bookId, "open_threads")) || [];
     await M.setPlot(env, bookId, "open_threads", Array.from(new Set([...cur, ...d.plot.open_threads])).slice(-50));
   }
+}
+
+// 去掉正文开头模型自己写的标题行（如"第12章 暗巷杀机"/"第十二章 …"），统一改由系统拼接
+function stripLeadingTitle(t: string): string {
+  const lines = t.replace(/\r\n/g, "\n").split("\n");
+  let i = 0;
+  while (i < lines.length && lines[i].trim() === "") i++;
+  if (i < lines.length && /^第\s*[\d〇零一二三四五六七八九十百千两]+\s*章/.test(lines[i].trim())) {
+    i++;
+  }
+  return lines.slice(i).join("\n");
 }
 
 // ---------------- 排版规整：保证段间空行、去除多余空白 ----------------
