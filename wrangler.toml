@@ -23,17 +23,19 @@ database_id = "1d34e00f-c187-4cb8-b0e2-df0a6c8bc3c5"
 binding = "KV"
 id = "aec17942ebb2417fb77cf0d8e3effc3a"
 
-# --- Queues：异步生成任务，避免请求内一次写完整章导致超限 ---
-[[queues.producers]]
-binding = "GEN_QUEUE"
-queue = "chapter-gen"
-
-[[queues.consumers]]
-queue = "chapter-gen"
-max_batch_size = 1          # 一次只处理一章，保证顺序与状态一致性
-max_concurrency = 2         # 多本书可并发（每本同一时刻仍只跑一章）
-max_retries = 2
-dead_letter_queue = "chapter-gen-dlq"
+# --- Queues：可选，仅在【付费 Workers 计划】下开启。免费计划无需配置，
+#     系统会自动改用 Cron 每2分钟内联生成一章（功能一致，吞吐稍低）。
+#     若你已开通付费计划，取消下面几行注释、创建队列后重新部署即可获得更高吞吐。
+# [[queues.producers]]
+# binding = "GEN_QUEUE"
+# queue = "chapter-gen"
+#
+# [[queues.consumers]]
+# queue = "chapter-gen"
+# max_batch_size = 1          # 一次只处理一章，保证顺序与状态一致性
+# max_concurrency = 2         # 多本书可并发（每本同一时刻仍只跑一章）
+# max_retries = 2
+# dead_letter_queue = "chapter-gen-dlq"
 
 # --- 普通变量（非机密）。机密用 `wrangler secret put` 注入 ---
 [vars]
@@ -42,6 +44,8 @@ DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 TARGET_CHARS_MIN = "2500"
 TARGET_CHARS_MAX = "3000"
 MAX_CONTEXT_TOKENS = "60000"   # 按官方最大上下文留余量，可在 dashboard 调整
+MIN_BREAKTHROUGH_GAP = "20"    # 主角两次大境界突破最小章节间隔（防升级过快）
+POLISH_MODE = "auto"           # always=每章润色 / auto=仅检出AI味或重写时润色(省钱) / off=从不润色
 
 # 需要用 secret 注入的机密（不要写在这里）：
 #   wrangler secret put DEEPSEEK_API_KEY

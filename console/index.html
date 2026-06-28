@@ -29,9 +29,20 @@
     <section id="tab-books" class="tab active">
       <div class="row">
         <button onclick="loadBooks()">刷新</button>
+        <button onclick="openImport()">📥 导入大纲JSON</button>
         <button onclick="openWizard()">🧙 新书向导</button>
       </div>
       <div id="bookList"></div>
+
+      <dialog id="importDlg">
+        <h3>导入大纲 JSON（一键建书）</h3>
+        <p class="hint">把仓库里 <code>outlines/玄天鼎尊.book.json</code> 的全部内容复制粘贴进来，点创建即可（含文风/位面/角色，一步到位）。</p>
+        <textarea id="imp_json" rows="10" placeholder='在此粘贴 .book.json 的完整内容'></textarea>
+        <div class="row" style="margin-top:8px">
+          <button onclick="doImport()">创建</button>
+          <button onclick="document.getElementById('importDlg').close()">取消</button>
+        </div>
+      </dialog>
 
       <!-- ===================== 新书向导 ===================== -->
       <dialog id="wizard">
@@ -130,8 +141,9 @@
       <div class="row">
         <select id="memBook" onchange="loadMemory()"></select>
         <button onclick="loadMemory()">刷新</button>
-        <span class="hint">可直接修改角色生死/境界以人工防崩</span>
+        <span class="hint">可直接修改角色生死/境界/灵石以人工防崩</span>
       </div>
+      <div id="planeBanner" class="card" style="font-size:13px"></div>
       <h4>角色状态</h4>
       <div id="charList"></div>
       <h4>未了结伏笔</h4>

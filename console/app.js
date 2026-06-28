@@ -8,12 +8,27 @@ let curChapter = null; // { bookId, chapter_no }
 document.getElementById("apiBase").value = API;
 document.getElementById("token").value = TOKEN;
 
-function saveConn() {
+async function saveConn() {
   API = document.getElementById("apiBase").value.trim().replace(/\/$/, "");
   TOKEN = document.getElementById("token").value.trim();
   localStorage.setItem("apiBase", API);
   localStorage.setItem("token", TOKEN);
-  loadBooks(); fillBookSelectors();
+  if (!API || !TOKEN) { alert("请先填写「后台网址」和「ADMIN_TOKEN」两个框"); return; }
+  // 先做健康检查 + 鉴权测试，把真实问题暴露出来（而不是"毫无反应"）
+  try {
+    const h = await fetch(API + "/health").then((r) => r.json());
+    const bad = Object.entries(h).filter(([, v]) => String(v).includes("FAIL"));
+    if (bad.length) { alert("后台自检发现问题，请按教程补齐：\n" + bad.map(([k, v]) => `· ${k}: ${v}`).join("\n")); return; }
+  } catch (e) {
+    alert("连不上后台！请检查「后台网址」是否填对(应以 .workers.dev 结尾，不要带斜杠)。\n\n技术细节：" + e); return;
+  }
+  try {
+    const books = await call("/api/books");
+    await loadBooks();
+    alert(`✅ 连接成功！当前有 ${books.length} 本书。` + (books.length ? "" : "\n还没有书——可在书架点「🧙 新书向导」导入大纲。"));
+  } catch (e) {
+    alert("后台正常，但鉴权/读取失败：\n" + e + "\n\n多半是「ADMIN_TOKEN」填错了，要和你在 Cloudflare 设的一致。");
+  }
 }
 
 async function call(path, opts = {}) {
@@ -57,6 +72,26 @@ async function loadBooks() {
 async function startBook(id) { await call(`/api/books/${id}/start`, { method: "POST" }); loadBooks(); }
 async function stopBook(id) { await call(`/api/books/${id}/stop`, { method: "POST" }); loadBooks(); }
 async function genOne(id) { await call(`/api/books/${id}/generate`, { method: "POST", body: "{}" }); alert("已入队，约1-2分钟后出章"); }
+
+// 一键导入完整大纲 JSON（手机首选：含文风/位面/角色，无需电脑跑脚本）
+function openImport() {
+  if (!API || !TOKEN) return alert("请先在右上角填后台网址 + ADMIN_TOKEN 并点「连接」");
+  document.getElementById("importDlg").showModal();
+}
+async function doImport() {
+  let d;
+  try { d = JSON.parse(document.getElementById("imp_json").value); }
+  catch (e) { return alert("JSON 格式不对，请确认整段复制完整：\n" + e); }
+  try {
+    const chars = d.characters || [];
+    const body = { ...d }; delete body.characters;
+    const res = await call("/api/books", { method: "POST", body: JSON.stringify(body) });
+    if (chars.length) await call(`/api/books/${res.id}/characters`, { method: "POST", body: JSON.stringify({ characters: chars }) });
+    document.getElementById("importDlg").close();
+    alert(`✅ 已创建《${d.title || "未命名"}》并导入 ${chars.length} 个角色。\n去书架点「▶ 开始」即可自动写。`);
+    loadBooks();
+  } catch (e) { alert("导入失败：" + e); }
+}
 
 // ======================= 新书向导 =======================
 const WIZ_STEPS = ["基础·文风", "总纲·设定", "境界体系", "分卷大纲", "核心人物", "确认创建"];
@@ -233,7 +268,8 @@ async function loadChapters() {
 async function openChapter(bookId, no) {
   const c = await call(`/api/books/${bookId}/chapters/${no}`);
   curChapter = { bookId, chapter_no: no };
-  document.getElementById("chapterText").textContent = `第${c.chapter_no}章 ${c.title}\n\n${c.content}`;
+  // content 已自带规范标题行，直接展示，避免标题重复
+  document.getElementById("chapterText").textContent = c.content;
 }
 function copyChapter() {
   const t = document.getElementById("chapterText").textContent;
@@ -250,22 +286,45 @@ async function rewriteCurrent() {
 }
 
 // ---- 记忆库 ----
+const _assetCache = {}; // cid -> assets 对象，供 saveChar 合并灵石用
+function pj(s, fb) { try { return typeof s === "string" ? JSON.parse(s) : (s ?? fb); } catch { return fb; } }
+function fmtAssets(a) {
+  const pills = (a.pills||[]).map(x=>`${x.name}×${x.count}`).join("、");
+  const mats = (a.materials||[]).map(x=>`${x.name}×${x.count}`).join("、");
+  return [pills && "丹:"+pills, mats && "材:"+mats].filter(Boolean).join(" ｜ ") || "—";
+}
 async function loadMemory() {
   const id = document.getElementById("memBook").value; if (!id) return;
-  const [chars, fores, plot] = await Promise.all([
-    call(`/api/books/${id}/characters`), call(`/api/books/${id}/foreshadowing`), call(`/api/books/${id}/plot`),
+  const [book, chars, fores, plot] = await Promise.all([
+    call(`/api/books/${id}`), call(`/api/books/${id}/characters`),
+    call(`/api/books/${id}/foreshadowing`), call(`/api/books/${id}/plot`),
   ]);
+  // 位面横幅
+  const planes = pj(book.planes, []);
+  document.getElementById("planeBanner").innerHTML = planes.length
+    ? `当前位面：<b>${esc(book.current_plane||planes[0].name)}</b>　｜　位面表：${planes.map(p=>`${esc(p.name)}(序${p.min_realm}-${p.max_realm})`).join("、")}`
+    : "（本书未设位面）";
+
   document.getElementById("charList").innerHTML = `<table>
-    <tr><th>名</th><th>身份</th><th>存活</th><th>境界序</th><th>境界名</th><th>层</th><th>近况</th><th></th></tr>
-    ${chars.map((c) => `<tr>
+    <tr><th>名</th><th>身份</th><th>存活</th><th>境界序</th><th>境界名</th><th>层</th><th>灵石</th><th>身法/神通</th><th>法宝</th><th>家底</th><th>近况</th><th></th></tr>
+    ${chars.map((c) => {
+      const assets = pj(c.assets, {spirit_stones:0,pills:[],materials:[],misc:[]});
+      _assetCache[c.id] = assets;
+      const moves = pj(c.movement_arts, []).map(m=>`${m.name}[${m.kind||"?"}]`).join("、") || "—";
+      const arts = pj(c.artifacts, []).map(a=>`${a.name}(耐久${a.durability??"?"})`).join("、") || "—";
+      return `<tr>
       <td>${esc(c.name)}</td><td>${c.role}</td>
       <td><input type="checkbox" ${c.alive?"checked":""} id="al_${c.id}"></td>
-      <td><input style="width:50px" id="ri_${c.id}" value="${c.realm_index}"></td>
-      <td><input style="width:70px" id="rn_${c.id}" value="${esc(c.realm_name||"")}"></td>
-      <td><input style="width:45px" id="rs_${c.id}" value="${c.realm_sub||0}"></td>
-      <td><input style="width:200px" id="sn_${c.id}" value="${esc(c.status_notes||"")}"></td>
+      <td><input style="width:46px" id="ri_${c.id}" value="${c.realm_index}"></td>
+      <td><input style="width:64px" id="rn_${c.id}" value="${esc(c.realm_name||"")}"></td>
+      <td><input style="width:40px" id="rs_${c.id}" value="${c.realm_sub||0}"></td>
+      <td><input style="width:80px" id="ss_${c.id}" value="${assets.spirit_stones||0}"></td>
+      <td class="hint" title="${esc(moves)}">${esc(moves.slice(0,28))}</td>
+      <td class="hint" title="${esc(arts)}">${esc(arts.slice(0,28))}</td>
+      <td class="hint" title="${esc(fmtAssets(assets))}">${esc(fmtAssets(assets).slice(0,28))}</td>
+      <td><input style="width:160px" id="sn_${c.id}" value="${esc(c.status_notes||"")}"></td>
       <td><button onclick="saveChar('${c.id}')">存</button></td>
-    </tr>`).join("")}
+    </tr>`;}).join("")}
   </table>`;
   document.getElementById("foreList").innerHTML = `<table>
     <tr><th>状态</th><th>重要</th><th>埋/建议回收</th><th>标题</th></tr>
@@ -274,12 +333,15 @@ async function loadMemory() {
   document.getElementById("plotView").textContent = plot.map((p)=>`${p.key}: ${p.value}`).join("\n");
 }
 async function saveChar(cid) {
+  const assets = _assetCache[cid] || {spirit_stones:0,pills:[],materials:[],misc:[]};
+  assets.spirit_stones = +document.getElementById("ss_"+cid).value || 0; // 手动修正灵石，保留丹药/材料
   const body = {
     alive: document.getElementById("al_"+cid).checked,
     realm_index: +document.getElementById("ri_"+cid).value,
     realm_name: document.getElementById("rn_"+cid).value,
     realm_sub: +document.getElementById("rs_"+cid).value,
     status_notes: document.getElementById("sn_"+cid).value,
+    assets,
   };
   await call(`/api/characters/${cid}`, { method: "PUT", body: JSON.stringify(body) });
   alert("已保存");

@@ -132,11 +132,26 @@ export async function lastChapter(env: Env, bookId: string): Promise<any | null>
   ).bind(bookId).first<any>();
 }
 
+// 取最近 n 章的开头首句，喂给 draft 提示"别和这些雷同"，根治"每章开头都一样"
+export async function recentOpenings(env: Env, bookId: string, n = 5): Promise<string[]> {
+  const r = await env.DB.prepare(
+    "SELECT content FROM chapters WHERE book_id=? AND status='done' ORDER BY chapter_no DESC LIMIT ?"
+  ).bind(bookId, n).all<{ content: string }>();
+  return (r.results ?? []).map((row) => {
+    // content 形如 "第N章 标题\n\n正文..."，取正文首句（到第一个句末标点）
+    const bodyStart = row.content.indexOf("\n\n");
+    const body = bodyStart >= 0 ? row.content.slice(bodyStart + 2) : row.content;
+    const firstLine = body.trim().split("\n")[0] || "";
+    const m = firstLine.match(/^[^。！？…]{0,40}[。！？…]?/);
+    return (m ? m[0] : firstLine).slice(0, 40);
+  }).filter(Boolean);
+}
+
 // 无 Vectorize 的"记忆检索"：按 tag 关键词在历史章节 summary/tags 里匹配，取最相关的几条。
 export async function retrieveRelevant(env: Env, bookId: string, tags: string[], limit = 5): Promise<{ chapter_no: number; summary: string }[]> {
   if (!tags.length) return [];
   const r = await env.DB.prepare(
-    "SELECT chapter_no, summary, tags FROM chapters WHERE book_id=? AND status='done' ORDER BY chapter_no DESC LIMIT 200"
+    "SELECT chapter_no, summary, tags FROM chapters WHERE book_id=? AND status='done' ORDER BY chapter_no DESC LIMIT 400"
   ).bind(bookId).all<any>();
   const scored = (r.results ?? []).map((row) => {
     const t: string[] = safeArr(row.tags);

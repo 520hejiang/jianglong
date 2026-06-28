@@ -8,6 +8,8 @@
 //   生成：手动触发一章 / 重写某章
 // ============================================================================
 import type { Env } from "./types";
+import { dispatchChapter } from "./jobs";
+import { ensureSchema } from "./schema";
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json", ...cors() } });
@@ -25,6 +27,24 @@ export async function api(req: Request, env: Env, ctx: ExecutionContext): Promis
   const url = new URL(req.url);
   const p = url.pathname.replace(/\/+$/, "");
 
+  // 健康检查（公开，无需鉴权）：手机上打开 <后台网址>/health 即可一眼看出哪里没配好
+  if (req.method === "GET" && (p === "" || p === "/health" || p === "/api/health")) {
+    let d1 = "ok";
+    try { await env.DB.prepare("SELECT 1 AS x").first(); }
+    catch (e) { d1 = "FAIL(数据库未绑定或未建表): " + String(e); }
+    return json({
+      ok: true,
+      service: "novel-engine",
+      时间: new Date().toISOString(),
+      数据库D1: env.DB ? d1 : "FAIL(未绑定 DB)",
+      KV存储: env.KV ? "ok" : "FAIL(未绑定 KV)",
+      模型: env.DEEPSEEK_MODEL || "(未设置)",
+      DeepSeek密钥: env.DEEPSEEK_API_KEY ? "已配置" : "FAIL(未配置 DEEPSEEK_API_KEY)",
+      登录口令: env.ADMIN_TOKEN ? "已配置" : "FAIL(未配置 ADMIN_TOKEN)",
+      提示: "全部显示 ok/已配置 才算就绪；任何 FAIL 都要按教程补上",
+    });
+  }
+
   // 公开只读：供前端小说网站拉取已发布章节（按需可去掉鉴权）
   if (req.method === "GET" && p.startsWith("/public/")) return publicRoutes(p, env);
 
@@ -33,6 +53,7 @@ export async function api(req: Request, env: Env, ctx: ExecutionContext): Promis
   if (auth !== `Bearer ${env.ADMIN_TOKEN}`) return err("unauthorized", 401);
 
   try {
+    await ensureSchema(env); // 首次自动建表，手机用户无需手动跑 SQL
     // ---- books ----
     if (p === "/api/books" && req.method === "GET") {
       const r = await env.DB.prepare("SELECT id,title,status,next_chapter,target_chapters,total_chars,cursor_volume,last_error,updated_at FROM books ORDER BY updated_at DESC").all();
@@ -78,7 +99,7 @@ export async function api(req: Request, env: Env, ctx: ExecutionContext): Promis
       // start 时立即入队一章，不必等下一次 cron
       if (act === "start") {
         const b = await env.DB.prepare("SELECT next_chapter FROM books WHERE id=?").bind(id).first<{ next_chapter: number }>();
-        if (b) await env.GEN_QUEUE.send({ bookId: id, chapterNo: b.next_chapter, reason: "manual" });
+        if (b) await dispatchChapter(env, ctx, { bookId: id, chapterNo: b.next_chapter, reason: "manual" });
       }
       return json({ ok: true });
     }
@@ -91,7 +112,7 @@ export async function api(req: Request, env: Env, ctx: ExecutionContext): Promis
       const b = await env.DB.prepare("SELECT next_chapter FROM books WHERE id=?").bind(id).first<{ next_chapter: number }>();
       if (!b) return err("not found", 404);
       const ch = body.chapter ?? b.next_chapter;
-      await env.GEN_QUEUE.send({ bookId: id, chapterNo: ch, reason: body.rewrite ? "rewrite" : "manual" });
+      await dispatchChapter(env, ctx, { bookId: id, chapterNo: ch, reason: body.rewrite ? "rewrite" : "manual" });
       return json({ ok: true, queued: ch });
     }
 

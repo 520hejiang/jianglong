@@ -5,7 +5,7 @@
 export interface Env {
   DB: D1Database;
   KV: KVNamespace;
-  GEN_QUEUE: Queue<GenJob>;
+  GEN_QUEUE?: Queue<GenJob>; // 可选：仅在付费计划开启 Queues 时绑定；无则走 Cron 内联生成
   // vars
   DEEPSEEK_MODEL: string;
   DEEPSEEK_BASE_URL: string;
@@ -13,6 +13,7 @@ export interface Env {
   TARGET_CHARS_MAX: string;
   MAX_CONTEXT_TOKENS: string;
   MIN_BREAKTHROUGH_GAP?: string;
+  POLISH_MODE?: string; // always | auto | off，默认 auto（仅在检出AI味/超限/重写时润色，省钱）
   // secrets
   DEEPSEEK_API_KEY: string;
   TELEGRAM_BOT_TOKEN?: string;
