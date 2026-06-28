@@ -15,13 +15,13 @@ crons = ["* * * * *"]
 # --- D1 关系型数据库：存书、章节正文、角色状态、剧情状态、伏笔、日志 ---
 [[d1_databases]]
 binding = "DB"
-database_name = "novel_db"
-database_id = "<在 dashboard 创建后填入>"
+database_name = "he"
+database_id = "1d34e00f-c187-4cb8-b0e2-df0a6c8bc3c5"
 
 # --- KV：运行态开关 / 锁 / 限流计数 / 每日统计 ---
 [[kv_namespaces]]
 binding = "KV"
-id = "<在 dashboard 创建后填入>"
+id = "aec17942ebb2417fb77cf0d8e3effc3a"
 
 # --- Queues：可选，仅在【付费 Workers 计划】下开启。免费计划无需配置，
 #     系统会自动改用 Cron 每2分钟内联生成一章（功能一致，吞吐稍低）。
