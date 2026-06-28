@@ -118,6 +118,9 @@ export const PROMPT_DRAFT = `${STYLE_CONSTITUTION}
 - 与"上一章结尾"无缝衔接，承接其场景与情绪，但不要复述上一章内容。
 - 第三人称，冷静克制的硬核修仙文风；多用谋略、心理活动、环境与修炼细节。
 - 严守全部战力与人设铁律；斗法要写算计与底牌的合理铺垫，不写无脑爽。
+- 【能力约束】主角本章只能动用"当前世界状态"里【主角家底与已习得能力】清单中已列出的功法、身法、神通、秘术、法宝；严禁凭空使出未习得的招式。若本章要获得新能力，必须用明确剧情（夺取/传承/顿悟/兑换/炼成）交代其来历。
+- 【家底约束】涉及花费灵石、消耗丹药/材料时，数额不得超过主角现有家底；重大进项（缴获/抄家/拍卖所得）须有出处。
+- 【突破约束】境界突破需契机、资源与铺垫，不可在刚突破不久后又轻易突破；越境界杀敌必须付出代价（献祭/重伤/布局/舍本）。
 - 对话用中文全角引号；不出现现代词汇、英文、注释、小标题、作者旁白。
 - 段落自然分段，每段之间空一行（便于阅读与一键复制排版）。
 
@@ -156,20 +159,28 @@ export const PROMPT_UPDATE = `${STYLE_CONSTITUTION}
 {
   "characters": [
     { "name":"角色名", "realm_index":可选整数, "realm_name":"可选", "realm_sub":可选整数,
+      "breakthrough":可选布尔(本章是否发生大境界突破，realm_index 提升时为 true),
       "alive":可选布尔, "add_techniques":[{"name":"","layer":1,"maxLayer":13}],
+      "add_movement_arts":[{"name":"","kind":"身法|神通|秘术|瞳术","grade":"可选","note":"习得来历(夺取/传承/顿悟/兑换…)"}],
       "add_artifacts":[{"name":"","grade":"","durability":100,"note":""}],
+      "spirit_stones_delta":可选整数(本章灵石净变化，所得为正、花销为负),
+      "add_pills":[{"name":"丹药名","count":数量(消耗填负数)}],
+      "add_materials":[{"name":"材料名","count":数量(消耗填负数)}],
       "relations":[{"name":"","type":"","attitude":""}], "status_notes":"本章后该角色处境/伤势/秘密" }
   ],
   "foreshadow_new": [{"title":"","detail":"","importance":1到3,"due_ch":可选整数}],
   "foreshadow_update": [{"title":"已存在的伏笔标题","status":"developing|resolved|dropped"}],
   "plot": { "main_node":"主线推进到的节点(可选)", "explored_map_add":["新探索地点/势力"], "open_threads":["新增未了结线索"] },
+  "plane_change": "仅当本章主角飞升/转换位面时填新位面名(如「灵界」)，否则省略",
   "summary": "本章剧情摘要，200字以内，供下一章衔接使用",
   "tags": ["本章涉及的角色/地点/事件标签，5-12个，用于后续检索"]
 }
 
-注意：
-- realm_index 只能持平或+1（突破一个大境界），绝不可+2或无故降低。
+注意（务必遵守，否则记忆库会崩）：
+- realm_index 只能持平或+1（突破一个大境界），绝不可+2或无故降低；突破时 breakthrough=true。
 - 法宝耐久只能下降或维持，除非正文明确写了修复/祭炼。
+- add_movement_arts 只登记正文中"明确习得"的新身法/神通/秘术，并在 note 写清来历；正文未交代来历的不要登记。
+- 灵石/丹药/材料的增减必须与正文情节对应：花了多少写负数、得了多少写正数，不得凭空增减。
 - 只输出 JSON。
 
 【本章定稿】

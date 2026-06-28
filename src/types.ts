@@ -12,6 +12,7 @@ export interface Env {
   TARGET_CHARS_MIN: string;
   TARGET_CHARS_MAX: string;
   MAX_CONTEXT_TOKENS: string;
+  MIN_BREAKTHROUGH_GAP?: string;
   // secrets
   DEEPSEEK_API_KEY: string;
   TELEGRAM_BOT_TOKEN?: string;
@@ -36,6 +37,8 @@ export interface Book {
   volume_outline: string | null; // JSON Volume[]
   core_settings: string | null;
   power_system: string | null; // JSON PowerRank[]
+  planes: string | null; // JSON Plane[]
+  current_plane: string | null;
   style_prompt_override: string | null;
   next_chapter: number;
   target_chapters: number | null;
@@ -73,10 +76,30 @@ export interface CharacterState {
   realm_name: string;
   realm_sub: number;
   techniques: { name: string; layer: number; maxLayer: number }[];
+  movement_arts: { name: string; kind: string; grade?: string; note?: string }[];
   artifacts: { name: string; grade: string; durability: number; note?: string }[];
+  assets: Assets;
   relations: { name: string; type: string; attitude: string }[];
   status_notes: string;
   last_seen_ch: number;
+  last_breakthrough_ch: number;
+}
+
+// 家底：灵石 + 丹药 + 材料 + 杂项，net worth 追踪，防凭空暴涨/为负
+export interface Assets {
+  spirit_stones: number;
+  pills: { name: string; count: number }[];
+  materials: { name: string; count: number }[];
+  misc: string[];
+}
+
+export const emptyAssets = (): Assets => ({ spirit_stones: 0, pills: [], materials: [], misc: [] });
+
+// 位面：min/max 为境界序号区间，用于"位面-境界一致性"校验
+export interface Plane {
+  name: string;
+  min_realm: number;
+  max_realm: number;
 }
 
 export interface Foreshadow {
@@ -113,11 +136,18 @@ export interface StateDelta {
     realm_name?: string;
     realm_sub?: number;
     alive?: boolean;
+    breakthrough?: boolean; // 本章是否发生"大境界"突破（realm_index 提升）
     add_techniques?: { name: string; layer: number; maxLayer: number }[];
+    add_movement_arts?: { name: string; kind: string; grade?: string; note?: string }[]; // 本章新习得的身法/神通/秘术
     add_artifacts?: { name: string; grade: string; durability: number; note?: string }[];
+    // 家底增量：灵石净变化（正得负耗），丹药/材料的增减
+    spirit_stones_delta?: number;
+    add_pills?: { name: string; count: number }[];
+    add_materials?: { name: string; count: number }[];
     relations?: { name: string; type: string; attitude: string }[];
     status_notes?: string;
   }>;
+  plane_change?: string; // 本章主角飞升/转换到的新位面名（如「灵界」），无则省略
   foreshadow_new: Array<{ title: string; detail: string; importance: number; due_ch?: number }>;
   foreshadow_update: Array<{ title: string; status: "developing" | "resolved" | "dropped" }>;
   plot: {

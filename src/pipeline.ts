@@ -2,8 +2,8 @@
 // 多 Agent 流水线：读取记忆 -> 提取焦点 -> 细纲 -> 审核 -> 正文 -> 润色质检 -> 更新记忆
 // 一次 generateChapter 完整产出并落库一章。
 // ============================================================================
-import type { Env, Book, ChapterOutline, StateDelta } from "./types";
-import { cfg, DEFAULT_POWER_RANKS } from "./config";
+import type { Env, Book, ChapterOutline, StateDelta, Plane } from "./types";
+import { cfg, DEFAULT_PLANES } from "./config";
 import { chat, parseJson } from "./llm";
 import * as M from "./memory";
 import { validateDelta, hasBlocking, formatIssues } from "./validators";
@@ -21,6 +21,10 @@ async function tpl(env: Env, bookId: string, name: string, fallback: string): Pr
 
 const fill = (t: string, vars: Record<string, string | number>) =>
   t.replace(/\{\{(\w+)\}\}/g, (_, k) => String(vars[k] ?? ""));
+
+function safeParse<T>(s: string, fallback: T): T {
+  try { return JSON.parse(s) as T; } catch { return fallback; }
+}
 
 export interface ChapterResult {
   chapterNo: number;
@@ -49,10 +53,12 @@ export async function generateChapter(env: Env, bookId: string, chapterNo: numbe
   const last = await M.lastChapter(env, bookId);
 
   const charMap = new Map(chars.map((x) => [x.name, x]));
+  const planes: Plane[] = book.planes ? safeParse<Plane[]>(book.planes, []) : DEFAULT_PLANES;
+  const currentPlane = book.current_plane || planes[0]?.name || null;
 
   // ---------- 1. 焦点提取 ----------
   const baseMemoryNoRetrieval = M.compileMemoryContext({
-    chars, fores, mainNode, exploredMap, relevant: [],
+    chars, fores, mainNode, exploredMap, relevant: [], currentPlane,
     lastSummary: last?.summary || "", lastTail: last?.ending_tail || "",
   });
 
@@ -68,7 +74,7 @@ export async function generateChapter(env: Env, bookId: string, chapterNo: numbe
   // 基于焦点实体做"无 Vectorize 的记忆检索"
   const relevant = await M.retrieveRelevant(env, bookId, focus.must_use_entities || [], 5);
   let memory = M.compileMemoryContext({
-    chars, fores, mainNode, exploredMap, relevant,
+    chars, fores, mainNode, exploredMap, relevant, currentPlane,
     lastSummary: last?.summary || "", lastTail: last?.ending_tail || "",
   });
 
@@ -104,8 +110,12 @@ export async function generateChapter(env: Env, bookId: string, chapterNo: numbe
     // 抽取状态增量
     delta = await extractDelta(env, bookId, chapterNo, finalText, memory, stylePrefix);
 
-    // 硬规则校验
-    const issues = validateDelta(charMap, delta, fores, chapterNo);
+    // 硬规则校验（含突破节奏 / 位面一致 / 家底 / 身法出处）
+    const issues = validateDelta(charMap, delta, fores, {
+      chapterNo, planes, currentPlane,
+      minBreakthroughGap: c.minBreakthroughGap,
+      assetSurgeFactor: c.assetSurgeFactor,
+    });
     issuesText = issues.map((x) => `[${x.level}] ${x.rule}: ${x.detail}`);
     if (!hasBlocking(issues)) break;
 
@@ -135,7 +145,7 @@ export async function generateChapter(env: Env, bookId: string, chapterNo: numbe
     qc_report: JSON.stringify({ issues: issuesText }),
   });
 
-  await applyDelta(env, bookId, chapterNo, delta);
+  await applyDelta(env, bookId, chapterNo, delta, charMap);
 
   // 推进 book 进度
   await env.DB.prepare(
@@ -193,9 +203,14 @@ async function extractDelta(env: Env, bookId: string, ch: number, text: string, 
   return d;
 }
 
-async function applyDelta(env: Env, bookId: string, ch: number, d: StateDelta) {
+async function applyDelta(env: Env, bookId: string, ch: number, d: StateDelta, before: Map<string, import("./types").CharacterState>) {
   for (const cu of d.characters) {
     if (!cu.name) continue;
+    const prev = before.get(cu.name);
+    // 大境界突破 -> 记录本章为突破章，供节奏校验
+    const isUp = typeof cu.realm_index === "number" && prev && cu.realm_index > prev.realm_index;
+    // 家底增量（灵石净变化 + 丹药/材料增减），mergeAssets 负责累加与防负
+    const hasAsset = typeof cu.spirit_stones_delta === "number" || cu.add_pills?.length || cu.add_materials?.length;
     await M.upsertCharacter(env, bookId, {
       name: cu.name,
       ...(typeof cu.realm_index === "number" ? { realm_index: cu.realm_index } : {}),
@@ -205,10 +220,21 @@ async function applyDelta(env: Env, bookId: string, ch: number, d: StateDelta) {
       ...(cu.relations ? { relations: cu.relations } : {}),
       ...(cu.status_notes ? { status_notes: cu.status_notes } : {}),
       last_seen_ch: ch,
-      // techniques / artifacts 走"追加并去重"
+      ...(isUp ? { last_breakthrough_ch: ch } : {}),
+      // 功法 / 身法神通 / 法宝 走"追加并去重"
       ...(cu.add_techniques?.length ? { techniques: cu.add_techniques } : {}),
+      ...(cu.add_movement_arts?.length ? { movement_arts: cu.add_movement_arts } : {}),
       ...(cu.add_artifacts?.length ? { artifacts: cu.add_artifacts } : {}),
+      ...(hasAsset ? { assets: {
+        spirit_stones: cu.spirit_stones_delta ?? 0,
+        pills: cu.add_pills ?? [], materials: cu.add_materials ?? [], misc: [],
+      } } : {}),
     });
+  }
+  // 位面变更（飞升）-> 更新书的当前位面
+  if (d.plane_change) {
+    await env.DB.prepare("UPDATE books SET current_plane=?, updated_at=? WHERE id=?")
+      .bind(d.plane_change, Date.now(), bookId).run();
   }
   for (const f of d.foreshadow_new) {
     if (f.title) await M.addForeshadow(env, bookId, { ...f, planted_ch: ch });

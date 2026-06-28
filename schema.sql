@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS books (
   volume_outline TEXT,                         -- 分卷大纲（JSON 数组，见下方说明）
   core_settings  TEXT,                         -- 核心设定集（世界观/势力/地理/历法等，长文本）
   power_system   TEXT,                         -- 境界体系定义（JSON，见 power_ranks 说明）
+  planes         TEXT,                         -- 位面定义（JSON：[{name,min_realm,max_realm}]），用于位面-境界一致性校验
+  current_plane  TEXT,                          -- 当前所处位面名（随飞升剧情推进，校验器据此判断越界）
   style_prompt_override TEXT,                  -- 可选：覆盖默认文风 system prompt
   -- 进度
   next_chapter   INTEGER NOT NULL DEFAULT 1,   -- 下一个要生成的章号
@@ -69,10 +71,13 @@ CREATE TABLE IF NOT EXISTS characters (
   realm_name  TEXT,                            -- 境界名（炼气/筑基/结丹...）
   realm_sub   INTEGER DEFAULT 0,               -- 小层数（如炼气几层）
   techniques  TEXT,                            -- JSON：功法列表 [{name,layer,maxLayer}]
+  movement_arts TEXT,                          -- JSON：身法/神通/秘术 [{name,kind,grade,note}]，须随剧情习得方可用
   artifacts   TEXT,                            -- JSON：法宝列表 [{name,grade,durability,note}]
+  assets      TEXT,                            -- JSON：家底 {spirit_stones, pills:[{name,count}], materials:[{name,count}], misc:[]}
   relations   TEXT,                            -- JSON：人脉 [{name,type,attitude}]
   status_notes TEXT,                           -- 当前处境/伤势/秘密
   last_seen_ch INTEGER DEFAULT 0,
+  last_breakthrough_ch INTEGER DEFAULT 0,      -- 上次大境界突破章，用于突破节奏校验
   updated_at  INTEGER NOT NULL,
   UNIQUE(book_id, name)
 );

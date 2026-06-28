@@ -5,8 +5,9 @@
 //   - 上下文编译：把当前世界状态压成一段紧凑文本喂给 LLM
 // ============================================================================
 import type {
-  Env, Book, CharacterState, Foreshadow, StateDelta, Volume,
+  Env, Book, CharacterState, Foreshadow, StateDelta, Volume, Assets,
 } from "./types";
+import { emptyAssets } from "./types";
 
 const now = () => Date.now();
 const uid = () => crypto.randomUUID();
@@ -44,9 +45,10 @@ function rowToChar(row: any): CharacterState {
     aliases: safeArr(row.aliases), role: row.role ?? "npc",
     alive: !!row.alive, realm_index: row.realm_index ?? 0,
     realm_name: row.realm_name ?? "", realm_sub: row.realm_sub ?? 0,
-    techniques: safeArr(row.techniques), artifacts: safeArr(row.artifacts),
+    techniques: safeArr(row.techniques), movement_arts: safeArr(row.movement_arts),
+    artifacts: safeArr(row.artifacts), assets: safeAssets(row.assets),
     relations: safeArr(row.relations), status_notes: row.status_notes ?? "",
-    last_seen_ch: row.last_seen_ch ?? 0,
+    last_seen_ch: row.last_seen_ch ?? 0, last_breakthrough_ch: row.last_breakthrough_ch ?? 0,
   };
 }
 
@@ -56,28 +58,33 @@ export async function upsertCharacter(env: Env, bookId: string, c: Partial<Chara
   if (existing) {
     const prev = rowToChar(existing);
     const merged = { ...prev, ...c };
-    // 功法/法宝按 name 合并去重，避免每章覆盖丢失既有能力
+    // 功法/身法/法宝/人脉按 name 合并去重，避免每章覆盖丢失既有能力
     if (c.techniques) merged.techniques = mergeByName(prev.techniques, c.techniques);
+    if (c.movement_arts) merged.movement_arts = mergeByName(prev.movement_arts, c.movement_arts);
     if (c.artifacts) merged.artifacts = mergeByName(prev.artifacts, c.artifacts);
     if (c.relations) merged.relations = mergeByName(prev.relations, c.relations);
+    if (c.assets) merged.assets = mergeAssets(prev.assets, c.assets);
     await env.DB.prepare(
       `UPDATE characters SET aliases=?, role=?, alive=?, realm_index=?, realm_name=?, realm_sub=?,
-       techniques=?, artifacts=?, relations=?, status_notes=?, last_seen_ch=?, updated_at=?
+       techniques=?, movement_arts=?, artifacts=?, assets=?, relations=?, status_notes=?,
+       last_seen_ch=?, last_breakthrough_ch=?, updated_at=?
        WHERE book_id=? AND name=?`
     ).bind(
       J(merged.aliases), merged.role, merged.alive ? 1 : 0, merged.realm_index, merged.realm_name,
-      merged.realm_sub, J(merged.techniques), J(merged.artifacts), J(merged.relations),
-      merged.status_notes, merged.last_seen_ch, now(), bookId, c.name
+      merged.realm_sub, J(merged.techniques), J(merged.movement_arts), J(merged.artifacts),
+      J(merged.assets), J(merged.relations), merged.status_notes, merged.last_seen_ch,
+      merged.last_breakthrough_ch, now(), bookId, c.name
     ).run();
   } else {
     await env.DB.prepare(
       `INSERT INTO characters (id,book_id,name,aliases,role,alive,realm_index,realm_name,realm_sub,
-       techniques,artifacts,relations,status_notes,last_seen_ch,updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+       techniques,movement_arts,artifacts,assets,relations,status_notes,last_seen_ch,last_breakthrough_ch,updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
     ).bind(
       uid(), bookId, c.name, J(c.aliases ?? []), c.role ?? "npc", c.alive === false ? 0 : 1,
       c.realm_index ?? 0, c.realm_name ?? "", c.realm_sub ?? 0, J(c.techniques ?? []),
-      J(c.artifacts ?? []), J(c.relations ?? []), c.status_notes ?? "", c.last_seen_ch ?? 0, now()
+      J(c.movement_arts ?? []), J(c.artifacts ?? []), J(c.assets ?? emptyAssets()),
+      J(c.relations ?? []), c.status_notes ?? "", c.last_seen_ch ?? 0, c.last_breakthrough_ch ?? 0, now()
     ).run();
   }
 }
@@ -181,15 +188,27 @@ export function compileMemoryContext(p: {
   relevant: { chapter_no: number; summary: string }[];
   lastSummary: string;
   lastTail: string;
+  currentPlane?: string | null;
 }): string {
   const charLines = p.chars
     .filter((c) => c.role === "protagonist" || c.alive)
     .slice(0, 25)
     .map((c) => {
       const tech = c.techniques.map((t) => `${t.name}(${t.layer}/${t.maxLayer}层)`).join("、");
+      const move = (c.movement_arts || []).map((m) => `${m.name}[${m.kind}]`).join("、");
       const arts = c.artifacts.map((a) => `${a.name}[${a.grade},耐久${a.durability}]`).join("、");
-      return `- ${c.name}${c.aliases.length ? `(${c.aliases.join("/")})` : ""}｜${c.role}｜${c.alive ? "在世" : "已死"}｜境界:${c.realm_name}${c.realm_sub}层(序${c.realm_index})｜功法:${tech || "无"}｜法宝:${arts || "无"}｜近况:${c.status_notes || "—"}`;
+      return `- ${c.name}${c.aliases.length ? `(${c.aliases.join("/")})` : ""}｜${c.role}｜${c.alive ? "在世" : "已死"}｜境界:${c.realm_name}${c.realm_sub}层(序${c.realm_index})｜功法:${tech || "无"}｜身法/神通:${move || "无"}｜法宝:${arts || "无"}｜近况:${c.status_notes || "—"}`;
     }).join("\n");
+
+  // 主角家底单列，强约束"只能花已有的、只能用已习得的"
+  const hero = p.chars.find((c) => c.role === "protagonist");
+  const heroAssets = hero ? (() => {
+    const a = hero.assets || { spirit_stones: 0, pills: [], materials: [], misc: [] };
+    const pills = (a.pills || []).map((x) => `${x.name}×${x.count}`).join("、") || "无";
+    const mats = (a.materials || []).map((x) => `${x.name}×${x.count}`).join("、") || "无";
+    const move = (hero.movement_arts || []).map((m) => `${m.name}[${m.kind}]`).join("、") || "无";
+    return `主角「${hero.name}」当前家底——灵石:${a.spirit_stones}｜丹药:${pills}｜材料:${mats}｜杂项:${(a.misc || []).join("、") || "无"}\n主角已习得身法/神通/秘术:${move}（本章只能动用此清单内能力，新能力须经剧情习得并交代来历）`;
+  })() : "（无主角记录）";
 
   const foreLines = p.fores.slice(0, 20).map(
     (f) => `- [${f.status}|重要度${f.importance}|建议第${f.due_ch}章前回收] ${f.title}：${f.detail}`
@@ -198,8 +217,10 @@ export function compileMemoryContext(p: {
   const relLines = p.relevant.map((r) => `- 第${r.chapter_no}章：${r.summary}`).join("\n");
 
   return [
+    `【当前位面】${p.currentPlane || "（未设/凡界）"}`,
     `【主线进度】\n${p.mainNode ? JSON.stringify(p.mainNode) : "（起始）"}`,
     `【已探索地图/势力】\n${(p.exploredMap || []).join("、") || "（无）"}`,
+    `【主角家底与已习得能力（硬约束）】\n${heroAssets}`,
     `【在世/关键角色状态】\n${charLines || "（暂无）"}`,
     `【未了结伏笔/因果】\n${foreLines || "（无）"}`,
     `【相关历史剧情（按相关度检索）】\n${relLines || "（无）"}`,
@@ -214,6 +235,33 @@ function mergeByName<T extends { name: string }>(prev: T[], next: T[]): T[] {
   const map = new Map(prev.map((x) => [x.name, x]));
   for (const n of next) map.set(n.name, { ...map.get(n.name), ...n });
   return Array.from(map.values());
+}
+// 家底解析与合并：灵石累加，丹药/材料按 name 累加数量
+function safeAssets(s: any): Assets {
+  const a = safeJson(s);
+  if (!a || typeof a !== "object") return emptyAssets();
+  return {
+    spirit_stones: a.spirit_stones ?? 0,
+    pills: Array.isArray(a.pills) ? a.pills : [],
+    materials: Array.isArray(a.materials) ? a.materials : [],
+    misc: Array.isArray(a.misc) ? a.misc : [],
+  };
+}
+function mergeAssets(prev: Assets, next: Partial<Assets>): Assets {
+  const addCount = (base: { name: string; count: number }[], add?: { name: string; count: number }[]) => {
+    const map = new Map(base.map((x) => [x.name, x.count]));
+    for (const x of add || []) map.set(x.name, (map.get(x.name) ?? 0) + x.count);
+    return Array.from(map.entries()).map(([name, count]) => ({ name, count })).filter((x) => x.count > 0);
+  };
+  return {
+    spirit_stones: Math.max(0, (prev.spirit_stones ?? 0) + (next.spirit_stones ?? 0)),
+    pills: mergeCount(prev.pills, next.pills),
+    materials: mergeCount(prev.materials, next.materials),
+    misc: Array.from(new Set([...(prev.misc || []), ...(next.misc || [])])),
+  };
+  function mergeCount(base: { name: string; count: number }[], add?: { name: string; count: number }[]) {
+    return addCount(base, add);
+  }
 }
 const J = (v: unknown) => JSON.stringify(v ?? null);
 const safeArr = (s: any): any[] => { try { const v = JSON.parse(s); return Array.isArray(v) ? v : []; } catch { return []; } };

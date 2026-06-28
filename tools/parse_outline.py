@@ -197,13 +197,33 @@ def parse_characters(body: str):
                 for a in re.split(r"[，,、/]", field(sub, "法宝", "artifacts")) if a.strip()]
         techs = [{"name": t.strip(), "layer": 1, "maxLayer": 9}
                  for t in re.split(r"[，,、/]", field(sub, "功法", "techniques")) if t.strip()]
+        moves = [{"name": m.strip(), "kind": "身法", "note": "初始设定"}
+                 for m in re.split(r"[，,、/]", field(sub, "身法", "神通", "秘术")) if m.strip()]
+        stones_raw = field(sub, "灵石", "家底", "灵石数")
+        stones = int(re.sub(r"[^\d]", "", stones_raw) or 0) if stones_raw else 0
         notes = field(sub, "简介", "简述", "设定", "notes") or sub.strip()[:200]
         chars.append({
             "name": name, "role": role, "alive": True, "aliases": aliases,
             "realm_index": ri, "realm_name": rn, "realm_sub": rs,
-            "techniques": techs, "artifacts": arts, "relations": [], "status_notes": notes,
+            "techniques": techs, "movement_arts": moves, "artifacts": arts,
+            "assets": {"spirit_stones": stones, "pills": [], "materials": [], "misc": []},
+            "relations": [], "status_notes": notes,
         })
     return chars
+
+
+def parse_planes(body: str, ranks):
+    """解析位面：'- 凡界: 练气-化神' -> {name, min_realm, max_realm}（按 ranks 名称定位序号）。"""
+    name_idx = {r["name"]: r["index"] for r in ranks}
+    planes = []
+    for ln in body.split("\n"):
+        m = re.match(r"^\s*[-*]?\s*([一-龥A-Za-z]+)\s*[:：]\s*([一-龥A-Za-z]+)\s*[-–~到至]\s*([一-龥A-Za-z]+)", ln)
+        if m:
+            lo = name_idx.get(m.group(2))
+            hi = name_idx.get(m.group(3))
+            if lo is not None and hi is not None:
+                planes.append({"name": m.group(1), "min_realm": min(lo, hi), "max_realm": max(lo, hi)})
+    return planes
 
 
 def parse(text: str, title=None, target_chapters=800, start_chapter=1):
@@ -215,16 +235,23 @@ def parse(text: str, title=None, target_chapters=800, start_chapter=1):
         "master_outline": "",
         "core_settings": "",
         "power_system": "",
+        "planes": "",
+        "current_plane": "",
         "volume_outline": "[]",
         "style_prompt_override": "",
         "characters": [],
     }
     extra_settings = []
+    plane_candidates = []
     for t, body in sections:
         if re.search(r"书名|title", t, re.I) and not body.strip():
             continue
         if re.search(r"文风|风格|文笔|style", t, re.I):
             book["style_prompt_override"] = body
+        elif re.search(r"位面|界域|plane", t, re.I):
+            # 可能有多个含"位面"的小节(如位面压制换算表)，先收集，稍后取能解析出区间的那个
+            plane_candidates.append(body)
+            extra_settings.append(f"【{t}】\n{body}")  # 同时并入设定，保留换算表说明
         elif re.search(r"总纲|主线|梗概|master", t, re.I):
             book["master_outline"] = body
         elif re.search(r"分卷|卷纲|volume|章节大纲", t, re.I):
@@ -243,6 +270,15 @@ def parse(text: str, title=None, target_chapters=800, start_chapter=1):
     book["core_settings"] = "\n\n".join(s for s in extra_settings if s).strip()
     if not book["power_system"]:
         book["power_system"] = json.dumps(DEFAULT_POWER, ensure_ascii=False)
+    # 位面需在境界解析后处理（依赖 rank 名->序号）；取第一个能解析出区间的候选
+    if plane_candidates:
+        ranks = json.loads(book["power_system"])
+        for body in plane_candidates:
+            planes = parse_planes(body, ranks)
+            if planes:
+                book["planes"] = json.dumps(planes, ensure_ascii=False)
+                book["current_plane"] = planes[0]["name"]
+                break
     return book
 
 

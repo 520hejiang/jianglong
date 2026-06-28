@@ -43,11 +43,11 @@ export async function api(req: Request, env: Env, ctx: ExecutionContext): Promis
       const id = uid();
       await env.DB.prepare(
         `INSERT INTO books (id,title,status,master_outline,volume_outline,core_settings,power_system,
-         style_prompt_override,next_chapter,target_chapters,total_chars,cursor_volume,created_at,updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,0,0,?,?)`
+         planes,current_plane,style_prompt_override,next_chapter,target_chapters,total_chars,cursor_volume,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,0,?,?)`
       ).bind(id, b.title || "未命名", "paused", b.master_outline ?? "", b.volume_outline ?? "[]",
-        b.core_settings ?? "", b.power_system ?? "", b.style_prompt_override ?? "",
-        b.start_chapter ?? 1, b.target_chapters ?? 800, now(), now()).run();
+        b.core_settings ?? "", b.power_system ?? "", b.planes ?? "", b.current_plane ?? "",
+        b.style_prompt_override ?? "", b.start_chapter ?? 1, b.target_chapters ?? 800, now(), now()).run();
       return json({ id });
     }
     const mBook = p.match(/^\/api\/books\/([^/]+)$/);
@@ -59,7 +59,7 @@ export async function api(req: Request, env: Env, ctx: ExecutionContext): Promis
       }
       if (req.method === "PUT") {
         const b = await req.json<any>();
-        const fields = ["title", "master_outline", "volume_outline", "core_settings", "power_system", "style_prompt_override", "target_chapters", "next_chapter"];
+        const fields = ["title", "master_outline", "volume_outline", "core_settings", "power_system", "planes", "current_plane", "style_prompt_override", "target_chapters", "next_chapter"];
         const sets: string[] = []; const vals: any[] = [];
         for (const f of fields) if (f in b) { sets.push(`${f}=?`); vals.push(b[f]); }
         if (!sets.length) return err("nothing to update");
@@ -110,16 +110,18 @@ export async function api(req: Request, env: Env, ctx: ExecutionContext): Promis
         if (!c?.name) continue;
         await env.DB.prepare(
           `INSERT INTO characters (id,book_id,name,aliases,role,alive,realm_index,realm_name,realm_sub,
-           techniques,artifacts,relations,status_notes,last_seen_ch,updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)
+           techniques,movement_arts,artifacts,assets,relations,status_notes,last_seen_ch,last_breakthrough_ch,updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,?)
            ON CONFLICT(book_id,name) DO UPDATE SET aliases=excluded.aliases, role=excluded.role,
              alive=excluded.alive, realm_index=excluded.realm_index, realm_name=excluded.realm_name,
-             realm_sub=excluded.realm_sub, techniques=excluded.techniques, artifacts=excluded.artifacts,
-             relations=excluded.relations, status_notes=excluded.status_notes, updated_at=excluded.updated_at`
+             realm_sub=excluded.realm_sub, techniques=excluded.techniques, movement_arts=excluded.movement_arts,
+             artifacts=excluded.artifacts, assets=excluded.assets, relations=excluded.relations,
+             status_notes=excluded.status_notes, updated_at=excluded.updated_at`
         ).bind(
           uid(), bookId, c.name, JSON.stringify(c.aliases ?? []), c.role ?? "npc",
           c.alive === false ? 0 : 1, c.realm_index ?? 0, c.realm_name ?? "", c.realm_sub ?? 0,
-          JSON.stringify(c.techniques ?? []), JSON.stringify(c.artifacts ?? []),
+          JSON.stringify(c.techniques ?? []), JSON.stringify(c.movement_arts ?? []),
+          JSON.stringify(c.artifacts ?? []), JSON.stringify(c.assets ?? { spirit_stones: 0, pills: [], materials: [], misc: [] }),
           JSON.stringify(c.relations ?? []), c.status_notes ?? "", now()
         ).run();
       }
@@ -129,7 +131,7 @@ export async function api(req: Request, env: Env, ctx: ExecutionContext): Promis
     if (mChar && req.method === "PUT") {
       // 手动改角色（生死/境界等，用于防崩）
       const b = await req.json<any>();
-      const allow = ["alive", "realm_index", "realm_name", "realm_sub", "techniques", "artifacts", "relations", "status_notes", "role"];
+      const allow = ["alive", "realm_index", "realm_name", "realm_sub", "techniques", "movement_arts", "artifacts", "assets", "relations", "status_notes", "role", "last_breakthrough_ch"];
       const sets: string[] = []; const vals: any[] = [];
       for (const f of allow) if (f in b) {
         sets.push(`${f}=?`);
