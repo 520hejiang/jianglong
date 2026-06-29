@@ -456,7 +456,7 @@ export function normalizeText(t: string): string {
   const junk = /^\s*[（(【\[]?\s*(未完待续|未完待续\.\.\.|待续|欲知后事如何.*|请看下章.*|敬请期待.*|作者的话|作者[：:].*|PS[：:].*|注[：:].*|本章完|全章完|—{0,2}\s*完\s*—{0,2}|\[.*占位.*\]|TODO.*)\s*[）)】\]]?\s*$/i;
   s = s.split("\n").filter((line) => !junk.test(line.trim())).join("\n");
   return s
-    .split(/\n{2,}/).map((p) => p.trim()).filter(Boolean).join("\n\n")
+    .split(/\n+/).map((p) => p.trim()).filter(Boolean).join("\n")
     .replace(/^[ \t]+/gm, "")
     .trim();
 }
