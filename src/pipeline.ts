@@ -8,8 +8,9 @@ import { chat, parseJson, chatJSON } from "./llm";
 import * as M from "./memory";
 import { validateDelta, hasBlocking, formatIssues, detectSlop } from "./validators";
 import {
-  PROMPT_EXTRACT, PROMPT_OUTLINE, PROMPT_REVIEW, PROMPT_DRAFT, PROMPT_POLISH, PROMPT_UPDATE,
+  PROMPT_EXTRACT, PROMPT_OUTLINE, PROMPT_REVIEW, PROMPT_DRAFT, PROMPT_POLISH, PROMPT_UPDATE, PROMPT_DIGEST,
 } from "./prompts";
+import { tg } from "./telegram";
 
 // 允许控制台覆盖默认模板
 async function tpl(env: Env, bookId: string, name: string, fallback: string): Promise<string> {
@@ -83,9 +84,10 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
     case "extract": {
       const mainNode = await M.getPlot(env, bookId, "main_node");
       const exploredMap: string[] = (await M.getPlot(env, bookId, "explored_map")) || [];
+      const storyDigest: string = (await M.getPlot(env, bookId, "story_digest")) || "";
       const last = await M.lastChapter(env, bookId);
       const baseMem = M.compileMemoryContext({
-        chars, fores, mainNode, exploredMap, relevant: [], currentPlane,
+        chars, fores, mainNode, exploredMap, relevant: [], currentPlane, storyDigest,
         lastSummary: last?.summary || "", lastTail: last?.ending_tail || "",
       });
       const extractRaw = await chat(env, [
@@ -97,7 +99,7 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
       await M.log(env, { bookId, chapterNo: ch, stage: "extract", message: `focus: ${focus.focus || "-"}`, meta: focus });
       const relevant = await M.retrieveRelevant(env, bookId, focus.must_use_entities || [], 5);
       const memory = M.compileMemoryContext({
-        chars, fores, mainNode, exploredMap, relevant, currentPlane,
+        chars, fores, mainNode, exploredMap, relevant, currentPlane, storyDigest,
         lastSummary: last?.summary || "", lastTail: last?.ending_tail || "",
       });
       const ops = await M.recentOpenings(env, bookId, 5);
@@ -188,6 +190,26 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
       }
       if (book.target_chapters && ch >= book.target_chapters) await M.setBookStatus(env, bookId, "finished");
       await M.log(env, { bookId, chapterNo: ch, stage: "update", message: `第${ch}章完成，${wc}字`, meta: { wc, issues: issuesText } });
+
+      // 死线清理：归档长期超期的次要伏笔
+      await M.pruneDeadThreads(env, bookId, ch);
+      // 每 10 章压缩一次"全书前情提要"（防 token 溢出/遗忘的核心）
+      if (ch % 10 === 0) {
+        await M.updateStoryDigest(env, bookId, ch, async (oldDigest, recent) => {
+          const r = await chat(env, [
+            { role: "system", content: fill(await tpl(env, bookId, "digest", PROMPT_DIGEST), {}) },
+            { role: "user", content: `【已有前情提要】\n${oldDigest || "（无）"}\n\n【最近章节摘要】\n${recent}` },
+          ], { temperature: 0.3, maxTokens: 900 });
+          return r.text;
+        });
+      }
+      // 每章自动发详细电报报告
+      const hero = (await M.loadCharacters(env, bookId)).find((x) => x.role === "protagonist");
+      const heroLine = hero ? `${hero.name} ${hero.realm_name}${hero.realm_sub}层｜灵石${hero.assets?.spirit_stones ?? 0}` : "—";
+      const rewrites = st.attempt || 0;
+      const qc = issuesText.length ? `\n质检: ${issuesText.join("；").slice(0, 300)}` : "";
+      await tg(env, `📖 <b>${book.title}</b> 第${ch}章 ${title}（${wc}字｜重写${rewrites}次）\n摘要: ${delta.summary || "—"}\n主角: ${heroLine}${qc}`);
+
       return { ...st, stage: "complete", title, wc, issues: issuesText };
     }
     default:
@@ -424,9 +446,16 @@ function stripLeadingTitle(t: string): string {
 
 // ---------------- 排版规整：保证段间空行、去除多余空白 ----------------
 export function normalizeText(t: string): string {
-  return t
+  let s = t
     .replace(/\r\n/g, "\n")
-    .replace(/[ \t]+\n/g, "\n")
+    .replace(/```[a-z]*\n?|```/gi, "")        // 去掉残留的代码围栏
+    .replace(/^#{1,6}\s+/gm, "")               // 去掉 markdown 标题符
+    .replace(/^[-*]{3,}\s*$/gm, "")            // 去掉分割线
+    .replace(/[ \t]+\n/g, "\n");
+  // 去掉出戏的"作者旁白/占位/未完待续"等尾巴（整行匹配，逐行清理）
+  const junk = /^\s*[（(【\[]?\s*(未完待续|未完待续\.\.\.|待续|欲知后事如何.*|请看下章.*|敬请期待.*|作者的话|作者[：:].*|PS[：:].*|注[：:].*|本章完|全章完|—{0,2}\s*完\s*—{0,2}|\[.*占位.*\]|TODO.*)\s*[）)】\]]?\s*$/i;
+  s = s.split("\n").filter((line) => !junk.test(line.trim())).join("\n");
+  return s
     .split(/\n{2,}/).map((p) => p.trim()).filter(Boolean).join("\n\n")
     .replace(/^[ \t]+/gm, "")
     .trim();

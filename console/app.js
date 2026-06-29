@@ -66,6 +66,7 @@ async function loadBooks() {
         <button onclick="stopBook('${b.id}')">⏸ 暂停</button>
         <button onclick="genOne('${b.id}')">⚡ 立即生成一章</button>
         <button class="danger" onclick="resetBook('${b.id}')">🔧 重置生成</button>
+        <button class="danger" onclick="wipeBook('${b.id}','${esc(b.title)}')">🧨 清空重置</button>
         <code class="meta">${b.id}</code>
       </div>
     </div>`).join("") || "<p class='hint'>暂无书，点击「新建书」。</p>";
@@ -78,6 +79,20 @@ async function resetBook(id) {
   if (!confirm("重置生成？会清掉卡住的生成/重写进度与锁，然后从下一章继续。已写好的章节不受影响。")) return;
   try { await call(`/api/books/${id}/reset`, { method: "POST" }); alert("已重置，约1-2分钟后会重新开始生成"); loadBooks(); }
   catch (e) { alert("重置失败：" + e); }
+}
+// 清空重置：删光本书全部内容回到第1章。三次确认防误触。
+async function wipeBook(id, title) {
+  if (!confirm(`【危险】清空《${title}》的全部内容？\n将删除所有章节、记忆、伏笔、剧情、日志，回到第1章从头开始。`)) return;
+  if (!confirm("第二次确认：此操作不可恢复！已经写好的所有章节都会被永久删除。确定继续？")) return;
+  const t = prompt('最后确认：请输入"清空"两个字以执行（输错或取消则不执行）：');
+  if (t !== "清空") { alert("已取消（未输入「清空」）"); return; }
+  try {
+    const r = await call(`/api/books/${id}/wipe`, { method: "POST" });
+    curChapter = null;
+    const ct = document.getElementById("chapterText"); if (ct) ct.textContent = "";
+    alert(`✅ 已清空并重置到第1章（恢复 ${r.reseeded || 0} 个初始角色）。\n去书架点「▶ 开始」即从头生成。`);
+    loadBooks();
+  } catch (e) { alert("清空失败：" + e); }
 }
 
 // 一键导入完整大纲 JSON（手机首选：含文风/位面/角色，无需电脑跑脚本）

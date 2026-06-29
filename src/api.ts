@@ -115,6 +115,43 @@ export async function api(req: Request, env: Env, ctx: ExecutionContext): Promis
       return json({ ok: true, note: "已重置并重新推进" });
     }
 
+    // 清空重置：删除本书全部章节/角色/伏笔/剧情/日志/存档，回到第1章（前端三次确认）
+    const mWipe = p.match(/^\/api\/books\/([^/]+)\/wipe$/);
+    if (mWipe && req.method === "POST") {
+      const id = mWipe[1];
+      const book = await env.DB.prepare("SELECT planes FROM books WHERE id=?").bind(id).first<{ planes: string }>();
+      if (!book) return err("not found", 404);
+      // 取出初始角色快照，清空后重新植入
+      const seedRow = await env.DB.prepare("SELECT value FROM plot_state WHERE book_id=? AND key='__char_seed'").bind(id).first<{ value: string }>();
+      const seed: any[] = seedRow ? (JSON.parse(seedRow.value) || []) : [];
+      for (const t of ["chapters", "foreshadowing", "characters", "plot_state", "logs"]) {
+        await env.DB.prepare(`DELETE FROM ${t} WHERE book_id=?`).bind(id).run();
+      }
+      await env.KV.delete(`genlock:${id}`);
+      for (const c of seed) {
+        if (!c?.name) continue;
+        await env.DB.prepare(
+          `INSERT INTO characters (id,book_id,name,aliases,role,alive,realm_index,realm_name,realm_sub,
+           techniques,movement_arts,artifacts,assets,relations,status_notes,last_seen_ch,last_breakthrough_ch,updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,?)`
+        ).bind(uid(), id, c.name, JSON.stringify(c.aliases ?? []), c.role ?? "npc",
+          c.alive === false ? 0 : 1, c.realm_index ?? 0, c.realm_name ?? "", c.realm_sub ?? 0,
+          JSON.stringify(c.techniques ?? []), JSON.stringify(c.movement_arts ?? []),
+          JSON.stringify(c.artifacts ?? []), JSON.stringify(c.assets ?? { spirit_stones: 0, pills: [], materials: [], misc: [] }),
+          JSON.stringify(c.relations ?? []), c.status_notes ?? "", now()).run();
+      }
+      if (seed.length) {
+        await env.DB.prepare(`INSERT INTO plot_state (book_id,key,value,updated_at) VALUES (?,?,?,?)`)
+          .bind(id, "__char_seed", JSON.stringify(seed), now()).run();
+      }
+      const planes = book.planes ? (JSON.parse(book.planes) || []) : [];
+      await env.DB.prepare("UPDATE books SET next_chapter=1, total_chars=0, cursor_volume=0, current_plane=?, status='paused', last_error=NULL, updated_at=? WHERE id=?")
+        .bind(planes[0]?.name ?? "", now(), id).run();
+      await env.DB.prepare("INSERT INTO logs (id,book_id,level,stage,message,meta,created_at) VALUES (?,?,?,?,?,?,?)")
+        .bind(uid(), id, "warn", "manual", `🧨 已清空本书全部内容，重置到第1章（恢复 ${seed.length} 个初始角色）`, null, now()).run();
+      return json({ ok: true, reseeded: seed.length, note: "已清空并重置到第1章，点开始即从头生成" });
+    }
+
     // 手动生成一章 / 重写某章
     const mGen = p.match(/^\/api\/books\/([^/]+)\/generate$/);
     if (mGen && req.method === "POST") {
@@ -164,6 +201,11 @@ export async function api(req: Request, env: Env, ctx: ExecutionContext): Promis
           JSON.stringify(c.relations ?? []), c.status_notes ?? "", now()
         ).run();
       }
+      // 存一份"初始角色快照"，供"清空重置"后从头恢复
+      await env.DB.prepare(
+        `INSERT INTO plot_state (book_id,key,value,updated_at) VALUES (?,?,?,?)
+         ON CONFLICT(book_id,key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`
+      ).bind(bookId, "__char_seed", JSON.stringify(list), now()).run();
       return json({ ok: true, count: list.length });
     }
     const mChar = p.match(/^\/api\/characters\/([^/]+)$/);

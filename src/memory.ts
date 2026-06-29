@@ -194,7 +194,9 @@ export async function releaseLock(env: Env, bookId: string) {
   await env.KV.delete(`genlock:${bookId}`);
 }
 
-// ---------------- 上下文编译：把世界状态压成喂给 LLM 的紧凑文本 ----------------
+// ---------------- 上下文编译：分层记忆，把世界状态压成喂给 LLM 的紧凑文本 ----------------
+// 五层：①全书前情提要(压缩) ②当前位面/主线 ③主角家底与能力(硬约束) ④关键角色 ⑤伏笔
+//      ⑥相关历史检索 + 上一章摘要 + 结尾。每层都有上限，保证几百万字后体量仍可控、不崩。
 export function compileMemoryContext(p: {
   chars: CharacterState[];
   fores: Foreshadow[];
@@ -204,9 +206,12 @@ export function compileMemoryContext(p: {
   lastSummary: string;
   lastTail: string;
   currentPlane?: string | null;
+  storyDigest?: string;
 }): string {
+  // 角色按"主角优先→最近出场优先"排序后封顶 25，长期不出场的路人自然被挤出（防膨胀）
   const charLines = p.chars
     .filter((c) => c.role === "protagonist" || c.alive)
+    .sort((a, b) => (a.role === "protagonist" ? -1 : b.role === "protagonist" ? 1 : (b.last_seen_ch || 0) - (a.last_seen_ch || 0)))
     .slice(0, 25)
     .map((c) => {
       const tech = c.techniques.map((t) => `${t.name}(${t.layer}/${t.maxLayer}层)`).join("、");
@@ -225,23 +230,53 @@ export function compileMemoryContext(p: {
     return `主角「${hero.name}」当前家底——灵石:${a.spirit_stones}｜丹药:${pills}｜材料:${mats}｜杂项:${(a.misc || []).join("、") || "无"}\n主角已习得身法/神通/秘术:${move}（本章只能动用此清单内能力，新能力须经剧情习得并交代来历）`;
   })() : "（无主角记录）";
 
-  const foreLines = p.fores.slice(0, 20).map(
-    (f) => `- [${f.status}|重要度${f.importance}|建议第${f.due_ch}章前回收] ${f.title}：${f.detail}`
-  ).join("\n");
+  // 伏笔按重要度→建议回收章排序，封顶 20（S 级硬记忆只留最关键的）
+  const foreLines = [...p.fores]
+    .sort((a, b) => (b.importance - a.importance) || ((a.due_ch || 9e9) - (b.due_ch || 9e9)))
+    .slice(0, 20)
+    .map((f) => `- [${f.status}|重要度${f.importance}|建议第${f.due_ch}章前回收] ${f.title}：${f.detail}`)
+    .join("\n");
 
   const relLines = p.relevant.map((r) => `- 第${r.chapter_no}章：${r.summary}`).join("\n");
+  const map40 = (p.exploredMap || []).slice(-40); // 地图/势力只留最近 40 条，防无限膨胀
 
   return [
+    // 第①层·全书前情提要（压缩，承载长程剧情，防 token 溢出/遗忘）
+    `【全书前情提要（已压缩，长程主线记忆）】\n${p.storyDigest || "（暂无，靠前章节）"}`,
+    // 第②层·当前世界硬状态（S 级永久记忆：位面/主线/家底/能力/境界，绝对不能忘）
     `【当前位面】${p.currentPlane || "（未设/凡界）"}`,
     `【主线进度】\n${p.mainNode ? JSON.stringify(p.mainNode) : "（起始）"}`,
-    `【已探索地图/势力】\n${(p.exploredMap || []).join("、") || "（无）"}`,
-    `【主角家底与已习得能力（硬约束）】\n${heroAssets}`,
-    `【在世/关键角色状态】\n${charLines || "（暂无）"}`,
-    `【未了结伏笔/因果】\n${foreLines || "（无）"}`,
+    `【已探索地图/势力（近40）】\n${map40.join("、") || "（无）"}`,
+    `【主角家底与已习得能力（硬约束·面板为准）】\n${heroAssets}`,
+    `【在世/关键角色状态（按活跃度，最多25）】\n${charLines || "（暂无）"}`,
+    `【未了结伏笔/因果（按重要度，最多20）】\n${foreLines || "（无）"}`,
+    // 第③层·相关历史检索 + 第④层·近期滑动窗口
     `【相关历史剧情（按相关度检索）】\n${relLines || "（无）"}`,
     `【上一章摘要】\n${p.lastSummary || "（这是第一章）"}`,
     `【上一章结尾原文（用于无缝衔接，勿重复其内容）】\n${p.lastTail || "（无）"}`,
   ].join("\n\n");
+}
+
+// 全书前情提要压缩：把"旧提要 + 最近若干章摘要"压成 ≤600 字的长程记忆。每 N 章更新一次。
+// 这是防"几百万字 token 溢出/遗忘"的核心：主程序内存里永远只跑这段精华，而非全部历史。
+export async function updateStoryDigest(env: Env, bookId: string, uptoChapter: number, summarize: (oldDigest: string, recent: string) => Promise<string>): Promise<void> {
+  const old = (await getPlot(env, bookId, "story_digest")) || "";
+  const r = await env.DB.prepare(
+    "SELECT chapter_no, summary FROM chapters WHERE book_id=? AND status='done' AND chapter_no<=? ORDER BY chapter_no DESC LIMIT 15"
+  ).bind(bookId, uptoChapter).all<{ chapter_no: number; summary: string }>();
+  const recent = (r.results ?? []).reverse().map((x) => `第${x.chapter_no}章：${x.summary}`).join("\n");
+  if (!recent) return;
+  try {
+    const digest = await summarize(typeof old === "string" ? old : JSON.stringify(old), recent);
+    if (digest && digest.trim()) await setPlot(env, bookId, "story_digest", digest.trim().slice(0, 1200));
+  } catch { /* 压缩失败不影响主流程 */ }
+}
+
+// 死线清理：把严重超期(超过建议回收章 100 章以上)仍未了结的次要伏笔自动归档，免得干扰主线。
+export async function pruneDeadThreads(env: Env, bookId: string, chapterNo: number): Promise<void> {
+  await env.DB.prepare(
+    "UPDATE foreshadowing SET status='dropped', updated_at=? WHERE book_id=? AND status NOT IN ('resolved','dropped') AND importance<=2 AND due_ch IS NOT NULL AND ?-due_ch>100"
+  ).bind(Date.now(), bookId, chapterNo).run();
 }
 
 // ---- helpers ----
