@@ -2,7 +2,7 @@
 # Cloudflare Workers 配置 —— 全自动修仙小说生成系统
 # 全部使用 Free Plan 可用组件：Workers / D1 / KV / Queues / Cron Triggers
 # ============================================================================
-name = "novel-engine"
+name = "jianglong"
 main = "src/index.ts"
 compatibility_date = "2024-09-01"
 compatibility_flags = ["nodejs_compat"]
