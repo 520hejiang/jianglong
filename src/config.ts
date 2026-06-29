@@ -6,8 +6,8 @@ import type { Env, PowerRank, Plane } from "./types";
 export const cfg = (env: Env) => ({
   model: env.DEEPSEEK_MODEL || "deepseek-v4-flash",
   baseUrl: (env.DEEPSEEK_BASE_URL || "https://api.deepseek.com").replace(/\/$/, ""),
-  charsMin: parseInt(env.TARGET_CHARS_MIN || "1300", 10),
-  charsMax: parseInt(env.TARGET_CHARS_MAX || "1700", 10),
+  charsMin: 1300, // 直接填字数
+charsMax: 1700, // 直接填字数
   maxContextTokens: parseInt(env.MAX_CONTEXT_TOKENS || "60000", 10),
   maxRewrite: 2,        // 正文质检不过最多重写次数
   maxReviewLoop: 2,     // 细纲审核最多打回次数
