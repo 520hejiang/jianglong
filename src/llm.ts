@@ -54,11 +54,29 @@ export async function chat(
         continue;
       }
       if (!res.ok) {
-        throw new Error(`LLM ${res.status}: ${await safeText(res)}`);
-      }
-      const data: any = await res.json();
-      const text: string = data?.choices?.[0]?.message?.content ?? "";
-      return { text, usage: data?.usage };
+  throw new Error(`LLM ${res.status}: ${await safeText(res)}`);
+}
+
+// ★★★ 核心修复：先当纯文本读出来，防止空内容直接崩掉 ★★★
+const rawText = await res.text();
+
+// 如果返回的是空字符串
+if (!rawText || rawText.trim() === "") {
+  console.error(`❌ [LLM 诊断] API 返回了空白内容 (状态码: ${res.status})。可能是 Cloudflare 超时或 Token 问题。`);
+  throw new Error(`API 返回内容为空 (Unexpected end of JSON input)`);
+}
+
+let data: any;
+try {
+  data = JSON.parse(rawText);
+} catch (e) {
+  // 如果解析失败，把原始内容打印到日志里，帮你查到底是什么
+  console.error(`❌ [LLM 诊断] JSON解析失败。API返回的原始内容如下:\n${rawText}`);
+  throw new Error(`响应不是有效的 JSON，请查看日志里的 "原始内容" 定位原因。`);
+}
+
+const text: string = data?.choices?.[0]?.message?.content ?? "";
+return { text, usage: data?.usage };
     } catch (e) {
       lastErr = e;
       await sleep(1000 * Math.pow(2, attempt));
