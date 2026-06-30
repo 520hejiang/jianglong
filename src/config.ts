@@ -7,15 +7,20 @@ export const cfg = (env: Env) => ({
   model: env.DEEPSEEK_MODEL || "deepseek-v4-flash",
   baseUrl: (env.DEEPSEEK_BASE_URL || "https://api.deepseek.com").replace(/\/$/, ""),
   charsMin: 1300, // 直接填字数
-charsMax: 1700, // 直接填字数
+  charsMax: 1700, // 直接填字数
   maxContextTokens: parseInt(env.MAX_CONTEXT_TOKENS || "60000", 10),
   maxRewrite: 2,        // 正文质检不过最多重写次数
   maxReviewLoop: 2,     // 细纲审核最多打回次数
-  // 主角"大境界"突破的最小章节间隔：防突破节奏过快（写着写着崩）。
-  // 默认 20 章；非主角可放宽一半。控制台/单书可按需调整。
+  
+  // 【核心修改】：主角"大境界"突破的最小章节间隔基数。
+  // 防突破节奏过快。后期此值会在管线（pipeline/validators）校验中进行指数级放大：
+  // 实际间隔 = minBreakthroughGap * (1.5 ^ realm_index)
+  // 效果：炼气(20章) -> 筑基(30章) -> 金丹(45章) -> 元婴(67章)... 保障500万字战力不崩
   minBreakthroughGap: parseInt(env.MIN_BREAKTHROUGH_GAP || "20", 10),
+  
   // 单章灵石净增幅超过此倍数（相对此前家底）且无重大事件，视为数值膨胀告警
   assetSurgeFactor: 50,
+  
   // 润色策略：always=每章都润色；auto=仅在检出AI味/篇幅超限/重写时润色(默认,省钱)；off=从不润色
   polishMode: (env.POLISH_MODE || "auto") as "always" | "auto" | "off",
 });
