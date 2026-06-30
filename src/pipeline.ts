@@ -1,4 +1,363 @@
 // ============================================================================
+// 记忆库读写层（D1 + KV）
+//   - 角色 / 剧情 / 伏笔 / 章节 的存取
+//   - 不用 Vectorize：用 tags 关键词匹配做"相关历史检索"
+//   - 上下文编译：把当前世界状态压成一段紧凑文本喂给 LLM
+// ============================================================================
+import type {
+  Env, Book, CharacterState, Foreshadow, StateDelta, Volume, Assets,
+} from "./types";
+import { emptyAssets } from "./types";
+
+const now = () => Date.now();
+const uid = () => crypto.randomUUID();
+
+// ---------------- Book ----------------
+export async function getBook(env: Env, id: string): Promise<Book | null> {
+  return env.DB.prepare("SELECT * FROM books WHERE id=?").bind(id).first<Book>();
+}
+
+export async function listRunningBooks(env: Env): Promise<Book[]> {
+  const r = await env.DB.prepare("SELECT * FROM books WHERE status='running'").all<Book>();
+  return r.results ?? [];
+}
+
+export async function setBookStatus(env: Env, id: string, status: Book["status"], err?: string) {
+  await env.DB.prepare("UPDATE books SET status=?, last_error=?, updated_at=? WHERE id=?")
+    .bind(status, err ?? null, now(), id).run();
+}
+
+export function volumeForChapter(book: Book, ch: number): Volume | null {
+  if (!book.volume_outline) return null;
+  const vols: Volume[] = JSON.parse(book.volume_outline);
+  return vols.find((v) => ch >= v.start_ch && ch <= v.end_ch) ?? vols[vols.length - 1] ?? null;
+}
+
+// ---------------- Characters ----------------
+export async function loadCharacters(env: Env, bookId: string): Promise<CharacterState[]> {
+  const r = await env.DB.prepare("SELECT * FROM characters WHERE book_id=?").bind(bookId).all<any>();
+  return (r.results ?? []).map(rowToChar);
+}
+
+function rowToChar(row: any): CharacterState {
+  return {
+    id: row.id, book_id: row.book_id, name: row.name,
+    aliases: safeArr(row.aliases), role: row.role ?? "npc",
+    alive: !!row.alive, realm_index: row.realm_index ?? 0,
+    realm_name: row.realm_name ?? "", realm_sub: row.realm_sub ?? 0,
+    techniques: safeArr(row.techniques), movement_arts: safeArr(row.movement_arts),
+    artifacts: safeArr(row.artifacts), assets: safeAssets(row.assets),
+    relations: safeArr(row.relations), status_notes: row.status_notes ?? "",
+    last_seen_ch: row.last_seen_ch ?? 0, last_breakthrough_ch: row.last_breakthrough_ch ?? 0,
+    // 【新增】还原性格与口癖
+    personality_traits: safeArr(row.personality_traits),
+    speech_pattern: row.speech_pattern ?? "",
+  };
+}
+
+export async function upsertCharacter(env: Env, bookId: string, c: Partial<CharacterState> & { name: string }) {
+  const existing = await env.DB.prepare("SELECT * FROM characters WHERE book_id=? AND name=?")
+    .bind(bookId, c.name).first<any>();
+  if (existing) {
+    const prev = rowToChar(existing);
+    const merged = { ...prev, ...c };
+    if (c.techniques) merged.techniques = mergeByName(prev.techniques, c.techniques);
+    if (c.movement_arts) merged.movement_arts = mergeByName(prev.movement_arts, c.movement_arts);
+    if (c.artifacts) merged.artifacts = mergeByName(prev.artifacts, c.artifacts);
+    if (c.relations) merged.relations = mergeByName(prev.relations, c.relations);
+    if (c.assets) merged.assets = mergeAssets(prev.assets, c.assets);
+    // 【新增】合并性格与口癖（用新值覆盖旧值）
+    if (c.personality_traits) merged.personality_traits = c.personality_traits;
+    if (c.speech_pattern) merged.speech_pattern = c.speech_pattern;
+    
+    await env.DB.prepare(
+      `UPDATE characters SET aliases=?, role=?, alive=?, realm_index=?, realm_name=?, realm_sub=?,
+       techniques=?, movement_arts=?, artifacts=?, assets=?, relations=?, status_notes=?,
+       last_seen_ch=?, last_breakthrough_ch=?, personality_traits=?, speech_pattern=?, updated_at=?
+       WHERE book_id=? AND name=?`
+    ).bind(
+      J(merged.aliases), merged.role, merged.alive ? 1 : 0, merged.realm_index, merged.realm_name,
+      merged.realm_sub, J(merged.techniques), J(merged.movement_arts), J(merged.artifacts),
+      J(merged.assets), J(merged.relations), merged.status_notes, merged.last_seen_ch,
+      merged.last_breakthrough_ch, J(merged.personality_traits ?? []), merged.speech_pattern ?? "",
+      now(), bookId, c.name
+    ).run();
+  } else {
+    await env.DB.prepare(
+      `INSERT INTO characters (id,book_id,name,aliases,role,alive,realm_index,realm_name,realm_sub,
+       techniques,movement_arts,artifacts,assets,relations,status_notes,last_seen_ch,last_breakthrough_ch,personality_traits,speech_pattern,updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+    ).bind(
+      uid(), bookId, c.name, J(c.aliases ?? []), c.role ?? "npc", c.alive === false ? 0 : 1,
+      c.realm_index ?? 0, c.realm_name ?? "", c.realm_sub ?? 0, J(c.techniques ?? []),
+      J(c.movement_arts ?? []), J(c.artifacts ?? []), J(c.assets ?? emptyAssets()),
+      J(c.relations ?? []), c.status_notes ?? "", c.last_seen_ch ?? 0, c.last_breakthrough_ch ?? 0,
+      J(c.personality_traits ?? []), c.speech_pattern ?? "", now()
+    ).run();
+  }
+}
+
+// ---------------- Plot state ----------------
+export async function getPlot(env: Env, bookId: string, key: string): Promise<any> {
+  const r = await env.DB.prepare("SELECT value FROM plot_state WHERE book_id=? AND key=?")
+    .bind(bookId, key).first<{ value: string }>();
+  return r ? safeJson(r.value) : null;
+}
+
+export async function setPlot(env: Env, bookId: string, key: string, value: unknown) {
+  await env.DB.prepare(
+    `INSERT INTO plot_state (book_id,key,value,updated_at) VALUES (?,?,?,?)
+     ON CONFLICT(book_id,key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`
+  ).bind(bookId, key, J(value), now()).run();
+}
+
+// ---------------- Foreshadowing ----------------
+export async function openForeshadowing(env: Env, bookId: string): Promise<Foreshadow[]> {
+  const r = await env.DB.prepare(
+    "SELECT * FROM foreshadowing WHERE book_id=? AND status!='resolved' AND status!='dropped' ORDER BY importance DESC"
+  ).bind(bookId).all<any>();
+  return (r.results ?? []) as Foreshadow[];
+}
+
+export async function addForeshadow(env: Env, bookId: string, f: { title: string; detail: string; importance: number; planted_ch: number; due_ch?: number }) {
+  await env.DB.prepare(
+    `INSERT INTO foreshadowing (id,book_id,title,detail,status,planted_ch,due_ch,importance,updated_at)
+     VALUES (?,?,?,?,'planted',?,?,?,?)`
+  ).bind(uid(), bookId, f.title, f.detail, f.planted_ch, f.due_ch ?? f.planted_ch + 50, f.importance, now()).run();
+}
+
+export async function updateForeshadowByTitle(env: Env, bookId: string, title: string, status: string, ch: number) {
+  await env.DB.prepare(
+    `UPDATE foreshadowing SET status=?, resolved_ch=CASE WHEN ?='resolved' THEN ? ELSE resolved_ch END, updated_at=?
+     WHERE book_id=? AND title=?`
+  ).bind(status, status, ch, now(), bookId, title).run();
+}
+
+// ---------------- Chapters & 检索 ----------------
+export async function lastChapter(env: Env, bookId: string): Promise<any | null> {
+  return env.DB.prepare(
+    "SELECT * FROM chapters WHERE book_id=? AND status='done' ORDER BY chapter_no DESC LIMIT 1"
+  ).bind(bookId).first<any>();
+}
+
+export async function recentOpenings(env: Env, bookId: string, n = 5): Promise<string[]> {
+  const r = await env.DB.prepare(
+    "SELECT content FROM chapters WHERE book_id=? AND status='done' ORDER BY chapter_no DESC LIMIT ?"
+  ).bind(bookId, n).all<{ content: string }>();
+  return (r.results ?? []).map((row) => {
+    const bodyStart = row.content.indexOf("\n\n");
+    const body = bodyStart >= 0 ? row.content.slice(bodyStart + 2) : row.content;
+    const firstLine = body.trim().split("\n")[0] || "";
+    const m = firstLine.match(/^[^。！？…]{0,40}[。！？…]?/);
+    return (m ? m[0] : firstLine).slice(0, 40);
+  }).filter(Boolean);
+}
+
+export async function retrieveRelevant(env: Env, bookId: string, tags: string[], limit = 5): Promise<{ chapter_no: number; summary: string }[]> {
+  if (!tags.length) return [];
+  const r = await env.DB.prepare(
+    "SELECT chapter_no, summary, tags FROM chapters WHERE book_id=? AND status='done' ORDER BY chapter_no DESC LIMIT 2000"
+  ).bind(bookId).all<any>();
+  const scored = (r.results ?? []).map((row) => {
+    const t: string[] = safeArr(row.tags);
+    const score = tags.reduce((acc, tag) => acc + (t.includes(tag) ? 2 : (row.summary || "").includes(tag) ? 1 : 0), 0);
+    return { chapter_no: row.chapter_no, summary: row.summary || "", score };
+  });
+  return scored.filter((s) => s.score > 0).sort((a, b) => b.score - a.score).slice(0, limit);
+}
+
+export async function saveChapter(env: Env, bookId: string, ch: {
+  chapter_no: number; title: string; outline: string; content: string;
+  summary: string; ending_tail: string; tags: string[]; word_count: number;
+  version: number; qc_report: string;
+}) {
+  await env.DB.prepare(
+    `INSERT INTO chapters (id,book_id,chapter_no,title,outline,content,summary,ending_tail,tags,word_count,status,version,qc_report,created_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,'done',?,?,?)`
+  ).bind(
+    uid(), bookId, ch.chapter_no, ch.title, ch.outline, ch.content, ch.summary,
+    ch.ending_tail, J(ch.tags), ch.word_count, ch.version, ch.qc_report, now()
+  ).run();
+}
+
+// ---------------- Logs ----------------
+export async function log(env: Env, p: { bookId?: string; chapterNo?: number; level?: string; stage?: string; message: string; meta?: unknown }) {
+  await env.DB.prepare(
+    `INSERT INTO logs (id,book_id,chapter_no,level,stage,message,meta,created_at) VALUES (?,?,?,?,?,?,?,?)`
+  ).bind(uid(), p.bookId ?? null, p.chapterNo ?? null, p.level ?? "info", p.stage ?? null, p.message, J(p.meta ?? null), now()).run();
+}
+
+// ---------------- 并发锁（KV） ----------------
+export async function acquireLock(env: Env, bookId: string, ttlSec = 120): Promise<boolean> {
+  const key = `genlock:${bookId}`;
+  const cur = await env.KV.get(key);
+  if (cur) return false;
+  await env.KV.put(key, String(now()), { expirationTtl: Math.max(60, ttlSec) });
+  return true;
+}
+export async function releaseLock(env: Env, bookId: string) {
+  await env.KV.delete(`genlock:${bookId}`);
+}
+
+// ---------------- 上下文编译：分层记忆 ----------------
+function compileRecentSceneContext(chars: CharacterState[], relevant: { chapter_no: number; summary: string }[]): string {
+  const recentSideChars = chars
+    .filter(c => c.role !== 'protagonist' && c.alive && c.last_seen_ch > 0)
+    .sort((a, b) => (b.last_seen_ch || 0) - (a.last_seen_ch || 0))
+    .slice(0, 10)
+    .map(c => `- ${c.name}（身份：${c.role}，境界：${c.realm_name}，上次出现于：第${c.last_seen_ch}章）`)
+    .join('\n') || '（无近期出场配角）';
+
+  const recentLocations = Array.from(new Set(
+    (relevant || []).flatMap(r => {
+      const summary = r.summary || '';
+      const locMatch = summary.match(/[（(]?(?:位于|来到|身处|抵达|在|于)([^，,。、！？)]{1,15}[城/山/谷/府/殿/岛])[）)]?/);
+      return locMatch ? [locMatch[1]] : [];
+    })
+  )).slice(0, 8).join('、') || '（无近期关键地点）';
+  
+  return `【近期关键配角（近100章内出场）】\n${recentSideChars}\n【近期活跃地点】\n${recentLocations}`;
+}
+
+export function compileMemoryContext(p: {
+  chars: CharacterState[];
+  fores: Foreshadow[];
+  mainNode: any;
+  exploredMap: string[];
+  relevant: { chapter_no: number; summary: string }[];
+  lastSummary: string;
+  lastTail: string;
+  currentPlane?: string | null;
+  storyDigest?: string;
+}): string {
+  const truncateList = (arr: any[], label: string): string => {
+    if (!arr || arr.length === 0) return '无';
+    const s = arr.slice(0, 15).map((t) => `${t.name}${t.layer !== undefined ? `(${t.layer}/${t.maxLayer}层)` : `[${t.grade || ''}]`}`).join('、');
+    return s + (arr.length > 15 ? `，及其他 ${arr.length - 15} 种${label}` : '');
+  };
+
+  const charLines = p.chars
+    .filter((c) => c.role === "protagonist" || c.alive)
+    .sort((a, b) => (a.role === "protagonist" ? -1 : b.role === "protagonist" ? 1 : (b.last_seen_ch || 0) - (a.last_seen_ch || 0)))
+    .slice(0, 25)
+    .map((c) => {
+      const tech = truncateList(c.techniques, '功法');
+      // 【注入】性格与口癖
+      const personality = c.personality_traits?.length ? `【性格】${c.personality_traits.join('、')}` : '';
+      const speech = c.speech_pattern ? `【口癖】${c.speech_pattern}` : '';
+      return `- ${c.name}${c.aliases.length ? `(${c.aliases.join("/")})` : ""}｜${c.role}｜${c.alive ? "在世" : "已死"}｜境界:${c.realm_name}${c.realm_sub}层｜功法:${tech}｜${personality} ${speech}｜近况:${c.status_notes || "—"}`;
+    }).join("\n");
+
+  const hero = p.chars.find((c) => c.role === "protagonist");
+  const heroAssets = hero ? (() => {
+    const a = hero.assets || { spirit_stones: 0, pills: [], materials: [], misc: [] };
+    const pills = truncateList(a.pills || [], '丹药');
+    const mats = truncateList(a.materials || [], '材料');
+    const move = truncateList(hero.movement_arts || [], '身法/神通');
+    return `主角「${hero.name}」当前家底——灵石:${a.spirit_stones}｜丹药:${pills}｜材料:${mats}\n主角已习得身法/神通:${move}（本章只能动用此清单内能力，新能力须经剧情习得并交代来历）`;
+  })() : "（无主角记录）";
+
+  const foreLines = [...p.fores]
+    .sort((a, b) => (b.importance - a.importance) || ((a.due_ch || 9e9) - (b.due_ch || 9e9)))
+    .slice(0, 20)
+    .map((f) => `- [${f.status}|重要度${f.importance}|建议第${f.due_ch}章前回收] ${f.title}：${f.detail}`)
+    .join("\n");
+
+  const relLines = p.relevant.map((r) => `- 第${r.chapter_no}章：${r.summary}`).join("\n");
+  const map40 = (p.exploredMap || []).slice(-40);
+  const sceneContext = compileRecentSceneContext(p.chars, p.relevant);
+  const progression = `【当前时间线】\n主角已修炼 ${hero?.last_breakthrough_ch || 0} 章，当前处于 ${p.currentPlane || '凡界'}，主角境界 ${hero?.realm_name || '凡人'} 第 ${hero?.realm_sub || 0} 层`;
+
+  return [
+    `【全书前情提要（已压缩，长程主线记忆）】\n${p.storyDigest || "（暂无，靠前章节）"}`,
+    `【当前位面】${p.currentPlane || "（未设/凡界）"}`,
+    `【主线进度】\n${p.mainNode ? JSON.stringify(p.mainNode) : "（起始）"}`,
+    `【已探索地图/势力（近40）】\n${map40.join("、") || "（无）"}`,
+    `【主角家底与已习得能力（硬约束·面板为准）】\n${heroAssets}`,
+    `【在世/关键角色状态（按活跃度，最多25）】\n${charLines || "（暂无）"}`,
+    `【未了结伏笔/因果（按重要度，最多20）】\n${foreLines || "（无）"}`,
+    sceneContext,
+    progression,
+    `【相关历史剧情（按相关度检索）】\n${relLines || "（无）"}`,
+    `【上一章摘要】\n${p.lastSummary || "（这是第一章）"}`,
+    `【上一章结尾原文（用于无缝衔接，勿重复其内容）】\n${p.lastTail || "（无）"}`,
+  ].join("\n\n");
+}
+
+// ---------------- 全书前情提要压缩 ----------------
+export async function updateStoryDigest(env: Env, bookId: string, uptoChapter: number, summarize: (oldDigest: string, recent: string) => Promise<string>): Promise<void> {
+  const firstFive = await env.DB.prepare(
+    "SELECT chapter_no, summary FROM chapters WHERE book_id=? AND status='done' AND chapter_no <= 5 ORDER BY chapter_no ASC"
+  ).bind(bookId).all<{ chapter_no: number; summary: string }>();
+  const firstSum = (firstFive.results ?? []).map((x) => `第${x.chapter_no}章：${x.summary}`).join("\n");
+  if (firstSum) {
+    await setPlot(env, bookId, "__first_chapters_anchor", firstSum);
+  }
+  const firstAnchor = (await getPlot(env, bookId, "__first_chapters_anchor")) || "";
+
+  const old = (await getPlot(env, bookId, "story_digest")) || "";
+  const r = await env.DB.prepare(
+    "SELECT chapter_no, summary FROM chapters WHERE book_id=? AND status='done' AND chapter_no<=? ORDER BY chapter_no DESC LIMIT 15"
+  ).bind(bookId, uptoChapter).all<{ chapter_no: number; summary: string }>();
+  const recent = (r.results ?? []).reverse().map((x) => `第${x.chapter_no}章：${x.summary}`).join("\n");
+  if (!recent) return;
+  try {
+    const oldStr = typeof old === 'string' ? old : JSON.stringify(old);
+    const finalOldDigest = `【绝对不可删减的开篇核心根源】\n${firstAnchor}\n\n【后续历史压缩】\n${oldStr}`;
+    const digest = await summarize(finalOldDigest, recent);
+    if (digest && digest.trim()) await setPlot(env, bookId, "story_digest", digest.trim().slice(0, 1200));
+  } catch { /* 压缩失败不影响主流程 */ }
+}
+
+export async function pruneDeadThreads(env: Env, bookId: string, chapterNo: number): Promise<void> {
+  await env.DB.prepare(
+    "UPDATE foreshadowing SET status='dropped', updated_at=? WHERE book_id=? AND status NOT IN ('resolved','dropped') AND importance<=2 AND due_ch IS NOT NULL AND ?-due_ch>100"
+  ).bind(Date.now(), bookId, chapterNo).run();
+}
+
+// ---- helpers ----
+function mergeByName<T extends { name: string }>(prev: T[], next: T[]): T[] {
+  const map = new Map(prev.map((x) => [x.name, x]));
+  for (const n of next) map.set(n.name, { ...map.get(n.name), ...n });
+  return Array.from(map.values());
+}
+function safeAssets(s: any): Assets {
+  const a = safeJson(s);
+  if (!a || typeof a !== "object") return emptyAssets();
+  return {
+    spirit_stones: a.spirit_stones ?? 0,
+    pills: Array.isArray(a.pills) ? a.pills : [],
+    materials: Array.isArray(a.materials) ? a.materials : [],
+    misc: Array.isArray(a.misc) ? a.misc : [],
+  };
+}
+function mergeAssets(prev: Assets, next: Partial<Assets>): Assets {
+  const addCount = (base: { name: string; count: number }[], add?: { name: string; count: number }[]) => {
+    const map = new Map(base.map((x) => [x.name, x.count]));
+    for (const x of add || []) map.set(x.name, (map.get(x.name) ?? 0) + x.count);
+    return Array.from(map.entries()).map(([name, count]) => ({ name, count })).filter((x) => x.count > 0);
+  };
+  return {
+    spirit_stones: Math.max(0, (prev.spirit_stones ?? 0) + (next.spirit_stones ?? 0)),
+    pills: mergeCount(prev.pills, next.pills),
+    materials: mergeCount(prev.materials, next.materials),
+    misc: Array.from(new Set([...(prev.misc || []), ...(next.misc || [])])),
+  };
+  function mergeCount(base: { name: string; count: number }[], add?: { name: string; count: number }[]) {
+    return addCount(base, add);
+  }
+}
+const J = (v: unknown) => JSON.stringify(v ?? null);
+const safeArr = (s: any): any[] => { try { const v = JSON.parse(s); return Array.isArray(v) ? v : []; } catch { return []; } };
+const safeJson = (s: any): any => { try { return JSON.parse(s); } catch { return null; } };
+```
+
+---
+
+4. 完整的 pipeline.ts
+
+```typescript
+// ============================================================================
 // 多 Agent 流水线：读取记忆 -> 提取焦点 -> 细纲 -> 审核 -> 正文 -> 润色质检 -> 更新记忆
 // 一次 generateChapter 完整产出并落库一章。
 // ============================================================================
@@ -35,7 +394,6 @@ export interface ChapterResult {
 }
 
 // 生成阶段（断点续传：每完成一步存档，被掐断也能从断点继续）
-// "rewrite" 是重写专用单步：取原章正文 → 毒舌润色 → 存新版本，不重跑剧情、不动状态。
 type Stage = "extract" | "outline" | "review" | "draft" | "polish" | "update" | "finalize" | "rewrite" | "complete";
 
 export interface GenState {
@@ -43,7 +401,6 @@ export interface GenState {
   version: number;
   stage: Stage;
   attempt: number;
-  // 各步产物（存档到 plot_state，跨调用续传）
   focusJson?: string;
   memory?: string;
   openings?: string;
@@ -53,17 +410,16 @@ export interface GenState {
   finalText?: string;
   deltaJson?: string;
   issues?: string[];
-  // 完成时回填，供 result 使用
   title?: string;
   wc?: number;
-  isRewrite?: boolean; // 重写模式：只更新正文/摘要，不重复应用状态增量、不推进进度
-  startedAt?: number;  // 重写发起时间，用于"长时间未完成则放弃"防卡死
+  isRewrite?: boolean;
+  startedAt?: number;
 }
 
 const GENJOB_KEY = "__genjob";
 const REWRITE_KEY = "__rewritejob";
 
-// 执行当前阶段的一步，返回推进后的状态。每步只做一次（或极少次）LLM 调用，确保单次调用很短。
+// 执行当前阶段的一步
 async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState> {
   const c = cfg(env);
   const book = await M.getBook(env, bookId);
@@ -150,10 +506,8 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
         minBreakthroughGap: c.minBreakthroughGap, assetSurgeFactor: c.assetSurgeFactor,
       });
       const issuesText = issues.map((x) => `[${x.level}] ${x.rule}: ${x.detail}`);
-      // 重写模式不因校验回炉（不应用增量，校验意义有限）；向前生成才回炉
       if (!st.isRewrite && hasBlocking(issues) && st.attempt < c.maxRewrite - 1) {
         await M.log(env, { bookId, chapterNo: ch, level: "warn", stage: "update", message: `质检未过(尝试${st.attempt + 1})，回炉重写: ${formatIssues(issues)}` });
-        // 回到 draft 重写，把违规反馈并入 memory
         return { ...st, stage: "draft", attempt: st.attempt + 1, memory: st.memory! + `\n\n【上一次生成违反了以下硬规则，本次务必修正】\n${formatIssues(issues)}` };
       }
       return { ...st, stage: "finalize", deltaJson: JSON.stringify(delta), issues: issuesText };
@@ -176,13 +530,11 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
       });
 
       if (st.isRewrite) {
-        // 重写：只换正文/摘要(新版本)，不重复应用增量、不推进进度，避免状态被算两遍
         await M.log(env, { bookId, chapterNo: ch, stage: "update", message: `第${ch}章已重写(v${st.version})，${wc}字`, meta: { wc, issues: issuesText } });
         return { ...st, stage: "complete", title, wc, issues: issuesText };
       }
 
       await applyDelta(env, bookId, ch, delta, charMap);
-      // 仅"向前生成"时推进 next_chapter
       if (ch === book.next_chapter) {
         await env.DB.prepare(
           "UPDATE books SET next_chapter=?, total_chars=total_chars+?, cursor_volume=?, updated_at=? WHERE id=?"
@@ -191,9 +543,7 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
       if (book.target_chapters && ch >= book.target_chapters) await M.setBookStatus(env, bookId, "finished");
       await M.log(env, { bookId, chapterNo: ch, stage: "update", message: `第${ch}章完成，${wc}字`, meta: { wc, issues: issuesText } });
 
-      // 死线清理：归档长期超期的次要伏笔
       await M.pruneDeadThreads(env, bookId, ch);
-      // 每 10 章压缩一次"全书前情提要"（防 token 溢出/遗忘的核心）
       if (ch % 10 === 0) {
         await M.updateStoryDigest(env, bookId, ch, async (oldDigest, recent) => {
           const r = await chat(env, [
@@ -203,7 +553,6 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
           return r.text;
         });
       }
-      // 每章自动发详细电报报告
       const hero = (await M.loadCharacters(env, bookId)).find((x) => x.role === "protagonist");
       const heroLine = hero ? `${hero.name} ${hero.realm_name}${hero.realm_sub}层｜灵石${hero.assets?.spirit_stones ?? 0}` : "—";
       const rewrites = st.attempt || 0;
@@ -217,7 +566,6 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
   }
 }
 
-// 一口气生成一章（用于测试 / 付费队列等执行时长充足的环境）
 export async function generateChapter(env: Env, bookId: string, chapterNo: number, version = 1): Promise<ChapterResult> {
   const dup = await env.DB.prepare(
     "SELECT 1 FROM chapters WHERE book_id=? AND chapter_no=? AND version=? AND status='done' LIMIT 1"
@@ -232,29 +580,20 @@ export async function generateChapter(env: Env, bookId: string, chapterNo: numbe
   return { chapterNo, title: st.title || `第${chapterNo}章`, wordCount: st.wc || 0, issues: st.issues || [] };
 }
 
-/**
- * 断点续传式推进一本书（免费计划 / Cron 用）：在 budgetMs 时间预算内尽量多走几步，
- * 每完成一步就存档到 plot_state。被平台掐断也只丢失正在进行的那一步，下次从断点续。
- * @returns "completed" 完成一章 | "progress" 推进了但未完 | "idle" 没活干/被锁
- */
 export async function advanceBook(env: Env, bookId: string, budgetMs = 18000): Promise<"completed" | "progress" | "idle"> {
   const start = Date.now();
-  const got = await M.acquireLock(env, bookId, 120); // 短锁：被掐断后 2 分钟内自动解开续传
+  const got = await M.acquireLock(env, bookId, 120);
   if (!got) return "idle";
   try {
     const book = await M.getBook(env, bookId);
     if (!book) return "idle";
 
-    // ① 重写任务优先（用户手动发起，暂停态也处理）。重写=单步：取原文→毒舌润色→覆盖。
-    // 抗卡死：超过 8 分钟仍未完成(多半被平台反复掐断)则放弃；抛错最多 3 次后放弃。
-    // 两者都会清空重写任务，避免一直堵住正常的向前生成。
     const rj = (await M.getPlot(env, bookId, REWRITE_KEY)) as GenState | null;
     if (rj && rj.stage && rj.stage !== "complete") {
       const stale = rj.startedAt && Date.now() - rj.startedAt > 8 * 60 * 1000;
       if (stale) {
         await M.setPlot(env, bookId, REWRITE_KEY, null);
         await M.log(env, { bookId, chapterNo: rj.chapterNo, level: "warn", stage: "rewrite", message: "重写长时间未完成，已放弃，恢复正常生成" });
-        // 落空，继续往下做向前生成
       } else {
         try {
           const st = await rewriteStep(env, bookId, rj);
@@ -274,7 +613,6 @@ export async function advanceBook(env: Env, bookId: string, budgetMs = 18000): P
       }
     }
 
-    // ② 向前生成（仅 running）
     if (book.status !== "running") return "idle";
     if (book.target_chapters && book.next_chapter > book.target_chapters) {
       await M.setBookStatus(env, bookId, "finished");
@@ -288,10 +626,10 @@ export async function advanceBook(env: Env, bookId: string, budgetMs = 18000): P
     }
     while (st.stage !== "complete" && Date.now() - start < budgetMs) {
       st = await runStep(env, bookId, st);
-      await M.setPlot(env, bookId, GENJOB_KEY, st); // 每步存档
+      await M.setPlot(env, bookId, GENJOB_KEY, st);
     }
     if (st.stage === "complete") {
-      await M.setPlot(env, bookId, GENJOB_KEY, null); // 清空，下次开新章
+      await M.setPlot(env, bookId, GENJOB_KEY, null);
       return "completed";
     }
     return "progress";
@@ -300,8 +638,6 @@ export async function advanceBook(env: Env, bookId: string, budgetMs = 18000): P
   }
 }
 
-// 发起"重写某章"：设置独立的重写存档槽（新版本号），advanceBook 会优先把它跑完。
-// 重写只更新该章正文/摘要，不重复应用状态增量（避免灵石/伏笔被算两遍）。
 export async function startRewrite(env: Env, bookId: string, chapterNo: number): Promise<number> {
   const r = await env.DB.prepare(
     "SELECT COALESCE(MAX(version),0) v FROM chapters WHERE book_id=? AND chapter_no=?"
@@ -312,15 +648,10 @@ export async function startRewrite(env: Env, bookId: string, chapterNo: number):
   return version;
 }
 
-// 重写单步：拿该章现有最新正文 → 用"毒舌老编辑"只改文笔(保留原剧情/状态) → 存为新版本。
-// 不重跑 extract/outline/draft，不喂当前世界状态(避免把后续章节剧情带进旧章)，不应用任何状态增量。
+// 重写模式：使用强制人类指令进行去AI味重写，不会误伤原有剧情和结尾
 async function rewriteStep(env: Env, bookId: string, st: GenState): Promise<GenState> {
-  const c = cfg(env);
   const book = await M.getBook(env, bookId);
   if (!book) return { ...st, stage: "complete" };
-  const stylePrefix = book.style_prompt_override
-    ? `【本书特别文风/设定要求（优先级最高）】\n${book.style_prompt_override}\n\n` : "";
-  // 取"原始版本"(version 最小)的正文来润色，避免把之前可能跑偏的重写版当成原文
   const ex = await env.DB.prepare(
     "SELECT id, title, content FROM chapters WHERE book_id=? AND chapter_no=? AND status='done' ORDER BY version ASC LIMIT 1"
   ).bind(bookId, st.chapterNo).first<any>();
@@ -328,13 +659,18 @@ async function rewriteStep(env: Env, bookId: string, st: GenState): Promise<GenS
     await M.log(env, { bookId, chapterNo: st.chapterNo, level: "warn", stage: "rewrite", message: "找不到原章节，无法重写" });
     return { ...st, stage: "complete" };
   }
-  const guard = "（重写模式：严格保留本章原有的剧情走向、人物状态、所有数字与设定，只提升文笔——去 AI 腔、加紧节奏、补主角内心戏。绝不引入后续章节的信息，绝不改变情节。）";
-  const polished = await polish(env, bookId, st.chapterNo, ex.content, guard, c, stylePrefix);
+  
+  const humanized = await chat(env, [
+    { role: "system", content: `你是一位纯正的人类网文作家。请把【初稿】里的“AI腔、生硬的词汇、模板化的套路”全部磨掉，换成中文人类的口语化表达、真实的动作细节和内心戏。
+【关键底线】严禁使用：仿佛、不禁、瞬间、竟然、居然、与此同时、不仅...而且、首先/其次。禁止替换原文的专有名词、人物名字、境界等级和灵石数量，只改文笔！` },
+    { role: "user", content: `【初稿】\n${ex.content}` }
+  ], { temperature: 0.6, maxTokens: 5000 });
+  const polished = humanized.text;
+
   const body = normalizeText(stripLeadingTitle(polished));
   const title = ex.title || `第${st.chapterNo}章`;
   const cleaned = `第${st.chapterNo}章 ${title}\n\n${body}`;
   const wc = body.replace(/\s/g, "").length;
-  // 就地覆盖原记录（不新增版本，避免列表出现重复章），并清掉该章其它残留版本
   await env.DB.prepare(
     "UPDATE chapters SET content=?, word_count=?, ending_tail=?, qc_report=? WHERE id=?"
   ).bind(cleaned, wc, body.slice(-320), JSON.stringify({ rewrite: true }), ex.id).run();
@@ -345,7 +681,6 @@ async function rewriteStep(env: Env, bookId: string, st: GenState): Promise<GenS
   return { ...st, stage: "complete", title, wc };
 }
 
-// ---------------- 各阶段封装 ----------------
 async function genOutline(env: Env, bookId: string, ch: number, volText: string, memory: string, focus: string, c: ReturnType<typeof cfg>, sp: string): Promise<ChapterOutline> {
   return chatJSON<ChapterOutline>(env, [
     { role: "system", content: sp + fill(await tpl(env, bookId, "outline", PROMPT_OUTLINE), { CH: ch, CMIN: c.charsMin, CMAX: c.charsMax }) },
@@ -355,11 +690,18 @@ async function genOutline(env: Env, bookId: string, ch: number, volText: string,
 }
 
 async function genDraft(env: Env, bookId: string, ch: number, outline: ChapterOutline, memory: string, tail: string, c: ReturnType<typeof cfg>, sp: string, openings: string): Promise<string> {
+  let memorySlim = memory;
+  const prefixRegex = /\n【全书前情提要（已压缩，长程主线记忆）】[\s\S]*?(?=\n【当前位面】)/;
+  if (prefixRegex.test(memory)) {
+    memorySlim = memory.replace(prefixRegex, '');
+  }
+  memorySlim = memorySlim.slice(0, 2000);
+
   const raw = await chat(env, [
     { role: "system", content: sp + fill(await tpl(env, bookId, "draft", PROMPT_DRAFT),
         { CH: ch, CMIN: c.charsMin, CMAX: c.charsMax, TITLE: outline.title, OPENINGS: openings }) },
-    { role: "user", content: fill("【本章细纲】\n{{OUTLINE}}\n\n【当前世界状态】\n{{MEMORY}}\n\n【上一章结尾】\n{{TAIL}}",
-        { OUTLINE: JSON.stringify(outline), MEMORY: memory, TAIL: tail }) },
+    { role: "user", content: fill("【本章细纲】\n{{OUTLINE}}\n\n【当前关键角色状态】\n{{MEMORY}}\n\n【上一章结尾】\n{{TAIL}}",
+        { OUTLINE: JSON.stringify(outline), MEMORY: memorySlim, TAIL: tail }) },
   ], { temperature: 0.85, maxTokens: 6000 });
   return raw.text;
 }
@@ -377,7 +719,6 @@ async function extractDelta(env: Env, bookId: string, ch: number, text: string, 
     { role: "system", content: sp + fill(await tpl(env, bookId, "update", PROMPT_UPDATE), { CH: ch }) },
     { role: "user", content: fill("【本章定稿】\n{{TEXT}}\n\n【当前世界状态】\n{{MEMORY}}", { TEXT: text, MEMORY: memory }) },
   ], { temperature: 0.2, maxTokens: 2000 });
-  // 兜底字段
   d.characters ??= []; d.foreshadow_new ??= []; d.foreshadow_update ??= [];
   d.plot ??= {}; d.tags ??= []; d.summary ??= "";
   return d;
@@ -387,10 +728,9 @@ async function applyDelta(env: Env, bookId: string, ch: number, d: StateDelta, b
   for (const cu of d.characters) {
     if (!cu.name) continue;
     const prev = before.get(cu.name);
-    // 大境界突破 -> 记录本章为突破章，供节奏校验
     const isUp = typeof cu.realm_index === "number" && prev && cu.realm_index > prev.realm_index;
-    // 家底增量（灵石净变化 + 丹药/材料增减），mergeAssets 负责累加与防负
     const hasAsset = typeof cu.spirit_stones_delta === "number" || cu.add_pills?.length || cu.add_materials?.length;
+    
     await M.upsertCharacter(env, bookId, {
       name: cu.name,
       ...(typeof cu.realm_index === "number" ? { realm_index: cu.realm_index } : {}),
@@ -401,7 +741,6 @@ async function applyDelta(env: Env, bookId: string, ch: number, d: StateDelta, b
       ...(cu.status_notes ? { status_notes: cu.status_notes } : {}),
       last_seen_ch: ch,
       ...(isUp ? { last_breakthrough_ch: ch } : {}),
-      // 功法 / 身法神通 / 法宝 走"追加并去重"
       ...(cu.add_techniques?.length ? { techniques: cu.add_techniques } : {}),
       ...(cu.add_movement_arts?.length ? { movement_arts: cu.add_movement_arts } : {}),
       ...(cu.add_artifacts?.length ? { artifacts: cu.add_artifacts } : {}),
@@ -409,9 +748,11 @@ async function applyDelta(env: Env, bookId: string, ch: number, d: StateDelta, b
         spirit_stones: cu.spirit_stones_delta ?? 0,
         pills: cu.add_pills ?? [], materials: cu.add_materials ?? [], misc: [],
       } } : {}),
+      // 【新增】动态更新人物性格和口癖
+      ...(cu.personality_traits ? { personality_traits: cu.personality_traits } : {}),
+      ...(cu.speech_pattern ? { speech_pattern: cu.speech_pattern } : {}),
     });
   }
-  // 位面变更（飞升）-> 更新书的当前位面
   if (d.plane_change) {
     await env.DB.prepare("UPDATE books SET current_plane=?, updated_at=? WHERE id=?")
       .bind(d.plane_change, Date.now(), bookId).run();
@@ -433,7 +774,6 @@ async function applyDelta(env: Env, bookId: string, ch: number, d: StateDelta, b
   }
 }
 
-// 去掉正文开头模型自己写的标题行（如"第12章 暗巷杀机"/"第十二章 …"），统一改由系统拼接
 function stripLeadingTitle(t: string): string {
   const lines = t.replace(/\r\n/g, "\n").split("\n");
   let i = 0;
@@ -444,17 +784,19 @@ function stripLeadingTitle(t: string): string {
   return lines.slice(i).join("\n");
 }
 
-// ---------------- 排版规整：保证段间空行、去除多余空白 ----------------
+// 【核心修正】绝对保护“未完待续”等人类结尾收尾，只删除 AI 生成时的占位符废话
 export function normalizeText(t: string): string {
   let s = t
     .replace(/\r\n/g, "\n")
-    .replace(/```[a-z]*\n?|```/gi, "")        // 去掉残留的代码围栏
-    .replace(/^#{1,6}\s+/gm, "")               // 去掉 markdown 标题符
-    .replace(/^[-*]{3,}\s*$/gm, "")            // 去掉分割线
+    .replace(/```[a-z]*\n?|```/gi, "")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^[-*]{3,}\s*$/gm, "")
     .replace(/[ \t]+\n/g, "\n");
-  // 去掉出戏的"作者旁白/占位/未完待续"等尾巴（整行匹配，逐行清理）
-  const junk = /^\s*[（(【\[]?\s*(未完待续|未完待续\.\.\.|待续|欲知后事如何.*|请看下章.*|敬请期待.*|作者的话|作者[：:].*|PS[：:].*|注[：:].*|本章完|全章完|—{0,2}\s*完\s*—{0,2}|\[.*占位.*\]|TODO.*)\s*[）)】\]]?\s*$/i;
+    
+  // 只过滤掉“作者的话”、“占位符”、“TODO”等确凿AI遗留物
+  const junk = /^\s*[（(【\[]?\s*(作者的话|作者[：:].*|PS[：:].*|注[：:].*|TODO.*|\[.*待补充.*\]|\[.*此处.*\])\s*[）)】\]]?\s*$/i;
   s = s.split("\n").filter((line) => !junk.test(line.trim())).join("\n");
+  
   return s
     .split(/\n+/).map((p) => p.trim()).filter(Boolean).join("\n")
     .replace(/^[ \t]+/gm, "")
