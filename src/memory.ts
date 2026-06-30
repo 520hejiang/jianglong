@@ -105,8 +105,9 @@ export async function setPlot(env: Env, bookId: string, key: string, value: unkn
 
 // ---------------- Foreshadowing ----------------
 export async function openForeshadowing(env: Env, bookId: string): Promise<Foreshadow[]> {
+  // 【核心修改】：过滤掉冷宫(cold_storage)状态的伏笔，避免挤占单章 Token
   const r = await env.DB.prepare(
-    "SELECT * FROM foreshadowing WHERE book_id=? AND status!='resolved' AND status!='dropped' ORDER BY importance DESC"
+    "SELECT * FROM foreshadowing WHERE book_id=? AND status NOT IN ('resolved', 'dropped', 'cold_storage') ORDER BY importance DESC"
   ).bind(bookId).all<any>();
   return (r.results ?? []) as Foreshadow[];
 }
@@ -147,51 +148,19 @@ export async function recentOpenings(env: Env, bookId: string, n = 5): Promise<s
   }).filter(Boolean);
 }
 
-// 🛡️【核心防遗忘修复】：把搜索范围从 400 扩展到 2000 章，500万字后依然能召回初始设定
-export async function retrieveRelevant(
-  env: Env,
-  bookId: string,
-  tags: string[],
-  limit = 5
-): Promise<{ chapter_no: number; summary: string }[]> {
-
+// 🛡️【核心防遗忘修复】：解除了原本 LIMIT 2000 的封印，允许全库扫描标签，五百万字不怕检索不到早期设定
+export async function retrieveRelevant(env: Env, bookId: string, tags: string[], limit = 5): Promise<{ chapter_no: number; summary: string }[]> {
   if (!tags.length) return [];
-
-  const r = await env.DB.prepare(`
-    SELECT chapter_no, summary, tags
-    FROM chapters
-    WHERE book_id = ?
-      AND status = 'done'
-    ORDER BY chapter_no DESC
-  `)
-    .bind(bookId)
-    .all<any>();
-
+  // 移除 LIMIT 2000，保障大后期依然能扫出几千章前的伏笔
+  const r = await env.DB.prepare(
+    "SELECT chapter_no, summary, tags FROM chapters WHERE book_id=? AND status='done' ORDER BY chapter_no DESC"
+  ).bind(bookId).all<any>();
   const scored = (r.results ?? []).map((row) => {
     const t: string[] = safeArr(row.tags);
-
-    const score = tags.reduce(
-      (acc, tag) =>
-        acc +
-        (t.includes(tag)
-          ? 2
-          : (row.summary || "").includes(tag)
-          ? 1
-          : 0),
-      0
-    );
-
-    return {
-      chapter_no: row.chapter_no,
-      summary: row.summary || "",
-      score,
-    };
+    const score = tags.reduce((acc, tag) => acc + (t.includes(tag) ? 2 : (row.summary || "").includes(tag) ? 1 : 0), 0);
+    return { chapter_no: row.chapter_no, summary: row.summary || "", score };
   });
-
-  return scored
-    .filter((s) => s.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit);
+  return scored.filter((s) => s.score > 0).sort((a, b) => b.score - a.score).slice(0, limit);
 }
 
 export async function saveChapter(env: Env, bookId: string, ch: {
@@ -320,23 +289,42 @@ export function compileMemoryContext(p: {
 // ---------------- 全书前情提要压缩 ----------------
 export async function updateStoryDigest(env: Env, bookId: string, uptoChapter: number, summarize: (oldDigest: string, recent: string) => Promise<string>): Promise<void> {
   const old = (await getPlot(env, bookId, "story_digest")) || "";
+  
   const r = await env.DB.prepare(
     "SELECT chapter_no, summary FROM chapters WHERE book_id=? AND status='done' AND chapter_no<=? ORDER BY chapter_no DESC LIMIT 15"
   ).bind(bookId, uptoChapter).all<{ chapter_no: number; summary: string }>();
+  
   const recent = (r.results ?? []).reverse().map((x) => `第${x.chapter_no}章：${x.summary}`).join("\n");
   if (!recent) return;
+  
   try {
     // 确保 old 是纯字符串
     const oldStr = typeof old === 'string' ? old : JSON.stringify(old);
     const digest = await summarize(oldStr, recent);
-    if (digest && digest.trim()) await setPlot(env, bookId, "story_digest", digest.trim().slice(0, 1200));
-  } catch { /* 压缩失败不影响主流程 */ }
+    
+    if (digest && digest.trim()) {
+      // 【核心修改】：放宽 1200 字的死锁，提升到 3000，防止 LLM 过度删减早期主线
+      const newDigest = digest.trim().slice(0, 3000); 
+      await setPlot(env, bookId, "story_digest", newDigest);
+
+      // 【核心修改】：分卷防遗忘机制（每 100 章强制打一个“记忆锚点”归档）
+      if (uptoChapter > 0 && uptoChapter % 100 === 0) {
+        const volumeNo = Math.floor(uptoChapter / 100);
+        await setPlot(env, bookId, `volume_archive_${volumeNo}`, newDigest);
+        console.log(`[卷宗归档] 第 ${volumeNo} 卷 (至第${uptoChapter}章) 核心提要已永久保存为 volume_archive_${volumeNo}`);
+      }
+    }
+  } catch (error) { 
+    console.error(`[StoryDigest Error] 第 ${uptoChapter} 章前情提要压缩失败:`, error); 
+  }
 }
 
 // ---------------- 死线清理（自动归档过期伏笔） ----------------
 export async function pruneDeadThreads(env: Env, bookId: string, chapterNo: number): Promise<void> {
+  // 【核心修改】：过期的伏笔不再被 dropped 彻底抛弃，而是进入 cold_storage（冷宫）。
+  // 防止修仙文动辄上千章的长线伏笔（如炼气期拿到的神秘断剑）被自动系统彻底抹杀。
   await env.DB.prepare(
-    "UPDATE foreshadowing SET status='dropped', updated_at=? WHERE book_id=? AND status NOT IN ('resolved','dropped') AND importance<=2 AND due_ch IS NOT NULL AND ?-due_ch>100"
+    "UPDATE foreshadowing SET status='cold_storage', updated_at=? WHERE book_id=? AND status NOT IN ('resolved','dropped','cold_storage') AND importance<=2 AND due_ch IS NOT NULL AND ?-due_ch>100"
   ).bind(Date.now(), bookId, chapterNo).run();
 }
 
