@@ -86,6 +86,11 @@ return { text, usage: data?.usage };
 
 // 要求模型返回 JSON 时的稳健解析（容忍 ```json 包裹、前后噪声、尾逗号、智能引号等常见瑕疵）
 export function parseJson<T>(raw: string): T {
+  // 🚨 第一步就判空，防止 API 返回空白导致直接崩溃
+  if (!raw || raw.trim() === "") {
+    throw new Error(`[parseJson 判空] API 返回的内容是空白的 (长度: ${raw.length})，无法解析。可能是 OpenCode 额度用尽或回包出错。`);
+  }
+
   let s = raw.trim();
   const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fence) s = fence[1].trim();
