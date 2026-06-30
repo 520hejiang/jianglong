@@ -368,12 +368,14 @@ import { tg } from "./telegram";
 
 // 允许控制台覆盖默认模板
 async function tpl(env: Env, bookId: string, name: string, fallback: string): Promise<string> {
+  // 用字符串拼接代替模板字符串，彻底绕开不可见字符导致的解析报错
+  const bookIdFull = bookId + ":" + name;
+  const globalId = "global:" + name;
   const row = await env.DB.prepare(
     "SELECT template FROM prompts WHERE name=? AND (id=? OR id=?) ORDER BY scope DESC LIMIT 1"
-  ).bind(name, `${bookId}:${name}`, `global:${name}`).first<{ template: string }>();
+  ).bind(name, bookIdFull, globalId).first<{ template: string }>();
   return row?.template || fallback;
 }
-
 const fill = (t: string, vars: Record<string, string | number>) =>
   t.replace(/\{\{(\w+)\}\}/g, (_, k) => String(vars[k] ?? ""));
 
