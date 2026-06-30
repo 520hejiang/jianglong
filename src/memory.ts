@@ -154,9 +154,7 @@ export async function retrieveRelevant(env: Env, bookId: string, tags: string[],
   SELECT chapter_no, summary, tags 
   FROM chapters 
   WHERE book_id = ? AND status = 'done' 
-  ORDER BY chapter_no DESC
-`;
-
+  ORDER BY chapter_no DESC`;
   ).bind(bookId).all<any>();
   const scored = (r.results ?? []).map((row) => {
     const t: string[] = safeArr(row.tags);
