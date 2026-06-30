@@ -36,7 +36,7 @@ export async function chat(
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 120_000); // 单次最长 120s
+      const timer = setTimeout(() => ctrl.abort(), 999_000); // 单次最长 999s
       const res = await fetch(`${c.baseUrl}/chat/completions`, {
         method: "POST",
         headers: {
