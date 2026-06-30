@@ -16,7 +16,7 @@ crons = ["* * * * *"]
 [[d1_databases]]
 binding = "DB"
 database_name = "he"
-database_id = "1d34e00f-c187-4cb8-b0e2-df0a6c8bc3c5"
+database_id = "12fb1dd5-b23a-4003-9565-f461d874114b"
 
 # --- KV：运行态开关 / 锁 / 限流计数 / 每日统计 ---
 [[kv_namespaces]]
