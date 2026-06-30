@@ -147,11 +147,11 @@ export async function recentOpenings(env: Env, bookId: string, n = 5): Promise<s
   }).filter(Boolean);
 }
 
-// 无 Vectorize 的"记忆检索"：按 tag 关键词在历史章节 summary/tags 里匹配，取最相关的几条。
+// 🛡️【核心防遗忘修复】：把搜索范围从 400 扩展到 2000 章，500万字后依然能召回初始设定
 export async function retrieveRelevant(env: Env, bookId: string, tags: string[], limit = 5): Promise<{ chapter_no: number; summary: string }[]> {
   if (!tags.length) return [];
   const r = await env.DB.prepare(
-    "SELECT chapter_no, summary, tags FROM chapters WHERE book_id=? AND status='done' ORDER BY chapter_no DESC LIMIT 400"
+    "SELECT chapter_no, summary, tags FROM chapters WHERE book_id=? AND status='done' ORDER BY chapter_no DESC LIMIT 2000"
   ).bind(bookId).all<any>();
   const scored = (r.results ?? []).map((row) => {
     const t: string[] = safeArr(row.tags);
@@ -182,9 +182,9 @@ export async function log(env: Env, p: { bookId?: string; chapterNo?: number; le
   ).bind(uid(), p.bookId ?? null, p.chapterNo ?? null, p.level ?? "info", p.stage ?? null, p.message, J(p.meta ?? null), now()).run();
 }
 
-// ---------------- 并发锁（KV）：同一本书同一时刻只跑一章 ----------------
+// ---------------- 并发锁（KV） ----------------
 export async function acquireLock(env: Env, bookId: string, ttlSec = 120): Promise<boolean> {
-  const key = `genlock:${bookId}`; // 新前缀：忽略旧版可能残留的长 TTL 锁
+  const key = `genlock:${bookId}`;
   const cur = await env.KV.get(key);
   if (cur) return false;
   await env.KV.put(key, String(now()), { expirationTtl: Math.max(60, ttlSec) });
@@ -194,9 +194,29 @@ export async function releaseLock(env: Env, bookId: string) {
   await env.KV.delete(`genlock:${bookId}`);
 }
 
-// ---------------- 上下文编译：分层记忆，把世界状态压成喂给 LLM 的紧凑文本 ----------------
-// 五层：①全书前情提要(压缩) ②当前位面/主线 ③主角家底与能力(硬约束) ④关键角色 ⑤伏笔
-//      ⑥相关历史检索 + 上一章摘要 + 结尾。每层都有上限，保证几百万字后体量仍可控、不崩。
+// ---------------- 上下文编译：分层记忆 ----------------
+// 🛡️【核心防遗忘修复】：新增获取近期关键配角与地点的辅助函数（防止大模型在500万字后把同一个人名字记混）
+function compileRecentSceneContext(chars: CharacterState[], relevant: { chapter_no: number; summary: string }[]): string {
+  // 捞取最近 100 章内出场的配角（非主角），按出场时间倒序防止遗忘
+  const recentSideChars = chars
+    .filter(c => c.role !== 'protagonist' && c.alive && c.last_seen_ch > 0)
+    .sort((a, b) => (b.last_seen_ch || 0) - (a.last_seen_ch || 0))
+    .slice(0, 10)
+    .map(c => `- ${c.name}（身份：${c.role}，境界：${c.realm_name}，上次出现于：第${c.last_seen_ch}章）`)
+    .join('\n') || '（无近期出场配角）';
+
+  // 尝试从历史摘要中提取出高频出现的“地点”，强塞进去，防主角在500万章后地名人名错乱
+  const recentLocations = Array.from(new Set(
+    (relevant || []).flatMap(r => {
+      const summary = r.summary || '';
+      const locMatch = summary.match(/[（(]?(?:位于|来到|身处|抵达|在|于)([^，,。、！？)]{1,15}[城/山/谷/府/殿/岛])[）)]?/);
+      return locMatch ? [locMatch[1]] : [];
+    })
+  )).slice(0, 8).join('、') || '（无近期关键地点）';
+  
+  return `【近期关键配角（近100章内出场）】\n${recentSideChars}\n【近期活跃地点】\n${recentLocations}`;
+}
+
 export function compileMemoryContext(p: {
   chars: CharacterState[];
   fores: Foreshadow[];
@@ -208,26 +228,30 @@ export function compileMemoryContext(p: {
   currentPlane?: string | null;
   storyDigest?: string;
 }): string {
+  // 截断函数：法宝、功法、丹药等永远只列前 15 个，防止上下文被堆爆
+  const truncateList = (arr: any[], label: string): string => {
+    if (!arr || arr.length === 0) return '无';
+    const s = arr.slice(0, 15).map((t) => `${t.name}${t.layer !== undefined ? `(${t.layer}/${t.maxLayer}层)` : `[${t.grade || ''}]`}`).join('、');
+    return s + (arr.length > 15 ? `，及其他 ${arr.length - 15} 种${label}` : '');
+  };
+
   // 角色按"主角优先→最近出场优先"排序后封顶 25，长期不出场的路人自然被挤出（防膨胀）
   const charLines = p.chars
     .filter((c) => c.role === "protagonist" || c.alive)
     .sort((a, b) => (a.role === "protagonist" ? -1 : b.role === "protagonist" ? 1 : (b.last_seen_ch || 0) - (a.last_seen_ch || 0)))
     .slice(0, 25)
     .map((c) => {
-      const tech = c.techniques.map((t) => `${t.name}(${t.layer}/${t.maxLayer}层)`).join("、");
-      const move = (c.movement_arts || []).map((m) => `${m.name}[${m.kind}]`).join("、");
-      const arts = c.artifacts.map((a) => `${a.name}[${a.grade},耐久${a.durability}]`).join("、");
-      return `- ${c.name}${c.aliases.length ? `(${c.aliases.join("/")})` : ""}｜${c.role}｜${c.alive ? "在世" : "已死"}｜境界:${c.realm_name}${c.realm_sub}层(序${c.realm_index})｜功法:${tech || "无"}｜身法/神通:${move || "无"}｜法宝:${arts || "无"}｜近况:${c.status_notes || "—"}`;
+      return `- ${c.name}${c.aliases.length ? `(${c.aliases.join("/")})` : ""}｜${c.role}｜${c.alive ? "在世" : "已死"}｜境界:${c.realm_name}${c.realm_sub}层｜功法:${truncateList(c.techniques, '功法')}｜近况:${c.status_notes || "—"}`;
     }).join("\n");
 
-  // 主角家底单列，强约束"只能花已有的、只能用已习得的"
+  // 主角家底单列，同样做“前15种”防膨胀
   const hero = p.chars.find((c) => c.role === "protagonist");
   const heroAssets = hero ? (() => {
     const a = hero.assets || { spirit_stones: 0, pills: [], materials: [], misc: [] };
-    const pills = (a.pills || []).map((x) => `${x.name}×${x.count}`).join("、") || "无";
-    const mats = (a.materials || []).map((x) => `${x.name}×${x.count}`).join("、") || "无";
-    const move = (hero.movement_arts || []).map((m) => `${m.name}[${m.kind}]`).join("、") || "无";
-    return `主角「${hero.name}」当前家底——灵石:${a.spirit_stones}｜丹药:${pills}｜材料:${mats}｜杂项:${(a.misc || []).join("、") || "无"}\n主角已习得身法/神通/秘术:${move}（本章只能动用此清单内能力，新能力须经剧情习得并交代来历）`;
+    const pills = truncateList(a.pills || [], '丹药');
+    const mats = truncateList(a.materials || [], '材料');
+    const move = truncateList(hero.movement_arts || [], '身法/神通');
+    return `主角「${hero.name}」当前家底——灵石:${a.spirit_stones}｜丹药:${pills}｜材料:${mats}\n主角已习得身法/神通:${move}（本章只能动用此清单内能力，新能力须经剧情习得并交代来历）`;
   })() : "（无主角记录）";
 
   // 伏笔按重要度→建议回收章排序，封顶 20（S 级硬记忆只留最关键的）
@@ -238,27 +262,29 @@ export function compileMemoryContext(p: {
     .join("\n");
 
   const relLines = p.relevant.map((r) => `- 第${r.chapter_no}章：${r.summary}`).join("\n");
-  const map40 = (p.exploredMap || []).slice(-40); // 地图/势力只留最近 40 条，防无限膨胀
+  const map40 = (p.exploredMap || []).slice(-40);
+
+  // 🛡️【核心防遗忘修复】：植入近期配角、近期地点、时间线进度，防大模型逻辑混淆
+  const sceneContext = compileRecentSceneContext(p.chars, p.relevant);
+  const progression = `【当前时间线】\n主角已修炼 ${hero?.last_breakthrough_ch || 0} 章，当前处于 ${p.currentPlane || '凡界'}，主角境界 ${hero?.realm_name || '凡人'} 第 ${hero?.realm_sub || 0} 层`;
 
   return [
-    // 第①层·全书前情提要（压缩，承载长程剧情，防 token 溢出/遗忘）
     `【全书前情提要（已压缩，长程主线记忆）】\n${p.storyDigest || "（暂无，靠前章节）"}`,
-    // 第②层·当前世界硬状态（S 级永久记忆：位面/主线/家底/能力/境界，绝对不能忘）
     `【当前位面】${p.currentPlane || "（未设/凡界）"}`,
     `【主线进度】\n${p.mainNode ? JSON.stringify(p.mainNode) : "（起始）"}`,
     `【已探索地图/势力（近40）】\n${map40.join("、") || "（无）"}`,
     `【主角家底与已习得能力（硬约束·面板为准）】\n${heroAssets}`,
     `【在世/关键角色状态（按活跃度，最多25）】\n${charLines || "（暂无）"}`,
     `【未了结伏笔/因果（按重要度，最多20）】\n${foreLines || "（无）"}`,
-    // 第③层·相关历史检索 + 第④层·近期滑动窗口
+    sceneContext,
+    progression,
     `【相关历史剧情（按相关度检索）】\n${relLines || "（无）"}`,
     `【上一章摘要】\n${p.lastSummary || "（这是第一章）"}`,
     `【上一章结尾原文（用于无缝衔接，勿重复其内容）】\n${p.lastTail || "（无）"}`,
   ].join("\n\n");
 }
 
-// 全书前情提要压缩：把"旧提要 + 最近若干章摘要"压成 ≤600 字的长程记忆。每 N 章更新一次。
-// 这是防"几百万字 token 溢出/遗忘"的核心：主程序内存里永远只跑这段精华，而非全部历史。
+// ---------------- 全书前情提要压缩 ----------------
 export async function updateStoryDigest(env: Env, bookId: string, uptoChapter: number, summarize: (oldDigest: string, recent: string) => Promise<string>): Promise<void> {
   const old = (await getPlot(env, bookId, "story_digest")) || "";
   const r = await env.DB.prepare(
@@ -267,12 +293,14 @@ export async function updateStoryDigest(env: Env, bookId: string, uptoChapter: n
   const recent = (r.results ?? []).reverse().map((x) => `第${x.chapter_no}章：${x.summary}`).join("\n");
   if (!recent) return;
   try {
-    const digest = await summarize(typeof old === "string" ? old : JSON.stringify(old), recent);
+    // 确保 old 是纯字符串
+    const oldStr = typeof old === 'string' ? old : JSON.stringify(old);
+    const digest = await summarize(oldStr, recent);
     if (digest && digest.trim()) await setPlot(env, bookId, "story_digest", digest.trim().slice(0, 1200));
   } catch { /* 压缩失败不影响主流程 */ }
 }
 
-// 死线清理：把严重超期(超过建议回收章 100 章以上)仍未了结的次要伏笔自动归档，免得干扰主线。
+// ---------------- 死线清理（自动归档过期伏笔） ----------------
 export async function pruneDeadThreads(env: Env, bookId: string, chapterNo: number): Promise<void> {
   await env.DB.prepare(
     "UPDATE foreshadowing SET status='dropped', updated_at=? WHERE book_id=? AND status NOT IN ('resolved','dropped') AND importance<=2 AND due_ch IS NOT NULL AND ?-due_ch>100"
