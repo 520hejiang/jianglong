@@ -150,8 +150,13 @@ export async function recentOpenings(env: Env, bookId: string, n = 5): Promise<s
 // 🛡️【核心防遗忘修复】：把搜索范围从 400 扩展到 2000 章，500万字后依然能召回初始设定
 export async function retrieveRelevant(env: Env, bookId: string, tags: string[], limit = 5): Promise<{ chapter_no: number; summary: string }[]> {
   if (!tags.length) return [];
-  const r = await env.DB.prepare(
-    "SELECT chapter_no, summary, tags FROM chapters WHERE book_id=? AND status='done' ORDER BY chapter_no DESC LIMIT 2000"
+  const query = `
+  SELECT chapter_no, summary, tags 
+  FROM chapters 
+  WHERE book_id = ? AND status = 'done' 
+  ORDER BY chapter_no DESC
+`;
+
   ).bind(bookId).all<any>();
   const scored = (r.results ?? []).map((row) => {
     const t: string[] = safeArr(row.tags);
