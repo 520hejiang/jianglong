@@ -352,11 +352,6 @@ const safeArr = (s: any): any[] => { try { const v = JSON.parse(s); return Array
 const safeJson = (s: any): any => { try { return JSON.parse(s); } catch { return null; } };
 ```
 
----
-
-4. 完整的 pipeline.ts
-
-```typescript
 // ============================================================================
 // 多 Agent 流水线：读取记忆 -> 提取焦点 -> 细纲 -> 审核 -> 正文 -> 润色质检 -> 更新记忆
 // 一次 generateChapter 完整产出并落库一章。
