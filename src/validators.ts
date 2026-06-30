@@ -23,7 +23,7 @@ export interface ValidateOpts {
  * @param before  本章生成前的角色快照（name -> state）
  * @param delta   本章抽取出的状态变更
  * @param fores   当前未回收的伏笔
- * @param chapterNo 当前章号
+ * @param opts    配置选项
  */
 export function validateDelta(
   before: Map<string, CharacterState>,
@@ -33,13 +33,19 @@ export function validateDelta(
 ): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const { chapterNo } = opts;
-  // 位面允许的境界上限（当前位面 max_realm）；多位面书飞升前不得越界
+  // 位面允许的境界上限。增加类型强判，防止配置写成字符串引发误判
   const plane = opts.planes.find((p) => p.name === opts.currentPlane) || null;
+
+  // 提前算出当前已有角色的最高境界，用于第 10 条规则（新角色凭空出世校验）
+  let maxExistingRealm = 0;
+  for (const c of before.values()) {
+    if ((c.realm_index || 0) > maxExistingRealm) maxExistingRealm = c.realm_index || 0;
+  }
 
   for (const cu of delta.characters) {
     const prev = before.get(cu.name);
 
-    // 规则1：死人不能复活（除非手动在控制台改 alive）
+    // --- 规则1：死人不能复活 ---
     if (prev && !prev.alive && cu.alive === true) {
       issues.push({
         level: "block",
@@ -48,9 +54,9 @@ export function validateDelta(
       });
     }
 
-    // 规则2：境界不能无故倒退（被废修为属剧情，需在 status_notes 标注"被废/自废"）
+    // --- 规则2：境界不能无故倒退 ---
     if (prev && typeof cu.realm_index === "number" && cu.realm_index < prev.realm_index) {
-      const justified = (cu.status_notes || "").match(/废|散功|跌境|重伤|封印/);
+      const justified = (cu.status_notes || "").match(/废|散功|跌境|重伤|封印|飞升|破空|转世|重修/);
       issues.push({
         level: justified ? "warn" : "block",
         rule: "REALM_REGRESS",
@@ -60,7 +66,7 @@ export function validateDelta(
       });
     }
 
-    // 规则3：单章境界暴涨（跨大境界）。炼气→筑基这种属正常突破；一次跳 ≥2 大境界异常。
+    // --- 规则3：单章境界跨度过大 ---
     if (prev && typeof cu.realm_index === "number" && cu.realm_index - prev.realm_index >= 2) {
       issues.push({
         level: "block",
@@ -69,7 +75,7 @@ export function validateDelta(
       });
     }
 
-    // 规则4：功法层数不能超过其上限
+    // --- 规则4：功法层数不能超过其上限 ---
     for (const t of cu.add_techniques || []) {
       if (t.maxLayer && t.layer > t.maxLayer) {
         issues.push({
@@ -80,7 +86,7 @@ export function validateDelta(
       }
     }
 
-    // 规则5：突破节奏。两次"大境界"突破间隔过短 -> 升级过快，写着写着崩。
+    // --- 规则5：突破节奏过快 ---
     const newIdx = typeof cu.realm_index === "number" ? cu.realm_index : prev?.realm_index ?? 0;
     const isBreakthrough = !!cu.breakthrough || (prev && newIdx > prev.realm_index);
     if (prev && isBreakthrough && newIdx > prev.realm_index) {
@@ -95,8 +101,8 @@ export function validateDelta(
       }
     }
 
-    // 规则6：位面-境界一致性。飞升前不得拥有超出本位面上限的境界。
-    if (plane && newIdx > plane.max_realm) {
+    // --- 规则6：位面-境界一致性（增加类型强判）---
+    if (plane && typeof plane.max_realm === 'number' && newIdx > plane.max_realm) {
       const ascending = !!delta.plane_change || /飞升|破空|位面|登临|渡入/.test(cu.status_notes || "");
       issues.push({
         level: ascending ? "warn" : "block",
@@ -107,10 +113,11 @@ export function validateDelta(
       });
     }
 
-    // 规则7：身家不能凭空暴涨 / 不能为负。
+    // --- 规则7：灵石账本自洽 ---
     if (typeof cu.spirit_stones_delta === "number") {
       const before2 = prev?.assets?.spirit_stones ?? 0;
       const after = before2 + cu.spirit_stones_delta;
+      // 7.1 不能算成负数
       if (after < 0) {
         issues.push({
           level: "block",
@@ -118,19 +125,24 @@ export function validateDelta(
           detail: `「${cu.name}」灵石将变为负数(${after})：花销超过家底，账目不自洽。`,
         });
       }
-      if (cu.spirit_stones_delta > 0 && before2 > 0 && cu.spirit_stones_delta > before2 * opts.assetSurgeFactor) {
-        const justified = /夺取|缴获|宝库|矿脉|献祭|抄家|商会|拍卖|赏赐/.test(cu.status_notes || "");
-        issues.push({
-          level: justified ? "warn" : "block",
-          rule: "ASSET_SURGE",
-          detail: `「${cu.name}」单章灵石暴增 ${cu.spirit_stones_delta}(超家底${opts.assetSurgeFactor}倍)${
-            justified ? "（已注明来源，放行）" : "——来路不明，疑似数值膨胀。"
-          }`,
-        });
+      // 7.2 防止灵石暴增（增加基础兜底 100 灵石，避免 0 资产时被误杀）
+      if (cu.spirit_stones_delta > 0) {
+        // 基数低时允许一定程度的自然小收入，超过 100 灵石才启动拦截
+        const threshold = Math.max(before2 * opts.assetSurgeFactor, 100);
+        if (cu.spirit_stones_delta > threshold) {
+          const justified = /夺取|缴获|宝库|矿脉|献祭|抄家|商会|拍卖|赏赐|交易|出售|买卖/.test(cu.status_notes || "");
+          issues.push({
+            level: justified ? "warn" : "block",
+            rule: "ASSET_SURGE",
+            detail: `「${cu.name}」单章灵石暴增 ${cu.spirit_stones_delta} (超家底倍数及兜底线 ${threshold})${
+              justified ? "（已注明来源，放行）" : "——来路不明，疑似数值膨胀。"
+            }`,
+          });
+        }
       }
     }
 
-    // 规则8：身法/神通/秘术须随剧情习得 —— 新增能力必须带类别与出处，杜绝凭空放招。
+    // --- 规则8：新增能力必须有交待 ---
     for (const m of cu.add_movement_arts || []) {
       if (!m.kind) {
         issues.push({
@@ -140,9 +152,20 @@ export function validateDelta(
         });
       }
     }
+
+    // --- 规则9：新增角色境界大检视（防凭空出世的高手）---
+    if (!prev && cu.name) {
+      if (typeof cu.realm_index === "number" && cu.realm_index > maxExistingRealm + 3) {
+        issues.push({
+          level: "warn",
+          rule: "NEW_CHARACTER_GOD",
+          detail: `新角色「${cu.name}」首次出场即拥有境界序 ${cu.realm_index}，远超当前最高序 ${maxExistingRealm}。请核对前文是否曾铺垫或暗示过此等高手的存在。`,
+        });
+      }
+    }
   }
 
-  // 规则9：伏笔超期未回收（不阻断，仅提醒审核阶段优先安排回收）
+  // --- 规则10：伏笔超期未回收 ---
   for (const f of fores) {
     if (f.status !== "resolved" && f.due_ch && chapterNo > f.due_ch) {
       issues.push({
@@ -157,13 +180,13 @@ export function validateDelta(
 }
 
 // ---------- AI 味 / 烂俗套话检测（纯代码，零成本，用于决定是否需要润色） ----------
-// 注意：只收录"足够具体、不会误伤正常行文"的套话。像"的气息""弥漫着""这是一个"
-// 这类碎片会命中大量正常句子（如"练气七层的气息"），一律不收，否则润色被无谓触发、白花钱。
+// 只收录确定性极高、不会被正常描写误伤的套话。补充了极度高频烂俗词汇。
 const SLOP_PHRASES = [
-  "空气仿佛凝固", "空气中仿佛凝固", "安静得可怕", "空气中弥漫着", "时间仿佛静止", "时间仿佛凝固",
+  "空气仿佛凝固", "安静得可怕", "时间仿佛静止", "时间仿佛凝固",
   "不知过了多久", "仿佛一道惊雷", "如遭雷击", "五味杂陈", "这一切才刚刚开始", "悄然破碎",
   "嘴角勾起一抹", "嘴角勾起一丝", "眼中闪过一丝", "命运的齿轮", "无法言喻", "难以言喻",
   "心如刀绞", "瞳孔骤缩", "似乎在诉说着", "仿佛在诉说",
+  "如坠冰窟", "脊背发凉", "冷汗直冒", "面色大变", "心头一紧", "脸色苍白", // 🔥 新增高频恶俗套话
 ];
 
 export interface SlopReport {
