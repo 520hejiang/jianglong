@@ -57,22 +57,21 @@ export async function chat(
   throw new Error(`LLM ${res.status}: ${await safeText(res)}`);
 }
 
-// ★★★ 核心修复：先当纯文本读出来，防止空内容直接崩掉 ★★★
+// ★★★ 核心升级：先读纯文本，防止空内容直接崩掉 ★★★
 const rawText = await res.text();
 
-// 如果返回的是空字符串
+// 如果返回的是完全空的字符串
 if (!rawText || rawText.trim() === "") {
-  console.error(`❌ [LLM 诊断] API 返回了空白内容 (状态码: ${res.status})。可能是 Cloudflare 超时或 Token 问题。`);
-  throw new Error(`API 返回内容为空 (Unexpected end of JSON input)`);
+  throw new Error(`API 返回了空内容 (状态码: ${res.status})。可能是 Cloudflare 超时、Token 失效或请求被拦截。`);
 }
 
 let data: any;
 try {
   data = JSON.parse(rawText);
 } catch (e) {
-  // 如果解析失败，把原始内容打印到日志里，帮你查到底是什么
-  console.error(`❌ [LLM 诊断] JSON解析失败。API返回的原始内容如下:\n${rawText}`);
-  throw new Error(`响应不是有效的 JSON，请查看日志里的 "原始内容" 定位原因。`);
+  // ★★★ 杀手锏：把 API 返回的真实内容截取一段，直接塞进报错信息里 ★★★
+  const snippet = rawText.length > 300 ? rawText.substring(0, 300) + "..." : rawText;
+  throw new Error(`响应不是有效的 JSON。API 返回的原始内容: ${snippet}`);
 }
 
 const text: string = data?.choices?.[0]?.message?.content ?? "";
