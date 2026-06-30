@@ -39,7 +39,7 @@ id = "aec17942ebb2417fb77cf0d8e3effc3a"
 
 # --- 普通变量（非机密）。机密用 `wrangler secret put` 注入 ---
 [vars]
-DEEPSEEK_MODEL = "Qwen3.7 Plus"
+DEEPSEEK_MODEL = "DeepSeek V4 Flash"
 DEEPSEEK_BASE_URL = "https://opencode.ai/zen/go/v1"
 TARGET_CHARS_MIN = "1300"
 TARGET_CHARS_MAX = "1700"
