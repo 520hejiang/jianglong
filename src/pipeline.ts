@@ -145,12 +145,45 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
     }
     case "update": {
       const delta = await extractDelta(env, bookId, ch, st.finalText!, st.memory!, stylePrefix);
-      const issues = validateDelta(charMap, delta, fores, {
+      const issues: any[] = validateDelta(charMap, delta, fores, {
         chapterNo: ch, planes, currentPlane,
         minBreakthroughGap: c.minBreakthroughGap, assetSurgeFactor: c.assetSurgeFactor,
-      });
+      }) as any[];
+
+      // =========================================================================
+      // 【核心安全墙】：绝对资产防穿透与指数级境界突破拦截
+      // =========================================================================
+      const heroName = chars.find(c => c.role === 'protagonist')?.name;
+      for (const cu of delta.characters) {
+        if (!cu.name) continue;
+        const prev = charMap.get(cu.name);
+        if (prev) {
+          // 1. 灵石防穿透：LLM算错账扣成负数，直接算致命错误(Fatal)打回重写
+          if (typeof cu.spirit_stones_delta === 'number') {
+            const newBalance = (prev.assets?.spirit_stones || 0) + cu.spirit_stones_delta;
+            if (newBalance < 0) {
+              issues.push({ level: 'error', rule: '资产穿透', detail: `${cu.name} 灵石变动 ${cu.spirit_stones_delta} 会导致余额为负 (${newBalance})，绝不允许。` });
+            }
+          }
+          // 2. 指数级境界防崩：替换原有的死板线性限制
+          if (cu.breakthrough || (cu.realm_index && cu.realm_index > prev.realm_index)) {
+            const baseGap = c.minBreakthroughGap;
+            const dynamicGap = Math.floor(baseGap * Math.pow(1.5, prev.realm_index || 0));
+            const chaptersSince = ch - (prev.last_breakthrough_ch || 0);
+            
+            // 如果是主角，严格执行指数级门槛拦截
+            if (cu.name === heroName && chaptersSince < dynamicGap) {
+              issues.push({ level: 'error', rule: '节奏过快', detail: `主角突破至下一大境界需沉淀 ${dynamicGap} 章，当前仅过 ${chaptersSince} 章，强制拦截！` });
+            }
+          }
+        }
+      }
+      // =========================================================================
+
       const issuesText = issues.map((x) => `[${x.level}] ${x.rule}: ${x.detail}`);
-      if (!st.isRewrite && hasBlocking(issues) && st.attempt < c.maxRewrite - 1) {
+      const hasFatal = issues.some(x => x.level === 'error'); // 捕捉我们自建的红线拦截
+
+      if (!st.isRewrite && (hasFatal || hasBlocking(issues)) && st.attempt < c.maxRewrite - 1) {
         await M.log(env, { bookId, chapterNo: ch, level: "warn", stage: "update", message: `质检未过(尝试${st.attempt + 1})，回炉重写: ${formatIssues(issues)}` });
         return { ...st, stage: "draft", attempt: st.attempt + 1, memory: st.memory! + `\n\n【上一次生成违反了以下硬规则，本次务必修正】\n${formatIssues(issues)}` };
       }
@@ -339,7 +372,9 @@ async function genDraft(env: Env, bookId: string, ch: number, outline: ChapterOu
   if (prefixRegex.test(memory)) {
     memorySlim = memory.replace(prefixRegex, '');
   }
-  memorySlim = memorySlim.slice(0, 2000);
+  // 【核心修改】：原先的 slice(0, 2000) 极其致命，会把精心编译的世界状态、角色列表、甚至是“上一章结尾原文”全被腰斩！
+  // 大幅放宽至 15000 字符，大模型上下文现在完全装得下，杜绝剧情跳跃。
+  memorySlim = memorySlim.slice(0, 15000);
 
   const raw = await chat(env, [
     { role: "system", content: sp + fill(await tpl(env, bookId, "draft", PROMPT_DRAFT),
