@@ -22,6 +22,17 @@ const cors = () => ({
 const now = () => Date.now();
 const uid = () => crypto.randomUUID();
 
+// 【新增】修复 D1 绑定对象的辅助函数：如果是数组或对象，自动转为 JSON 字符串
+const safeDbValue = (v: any, defaultVal: string = ''): any => {
+  if (v === null || v === undefined) return defaultVal;
+  // 数组或普通对象，必须序列化为字符串
+  if (Array.isArray(v) || (typeof v === 'object' && v !== null)) {
+    return JSON.stringify(v);
+  }
+  // 数字、字符串、布尔值原样返回
+  return v;
+};
+
 export async function api(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   if (req.method === "OPTIONS") return new Response(null, { headers: cors() });
   const url = new URL(req.url);
@@ -62,13 +73,15 @@ export async function api(req: Request, env: Env, ctx: ExecutionContext): Promis
     if (p === "/api/books" && req.method === "POST") {
       const b = await req.json<any>();
       const id = uid();
+      // 【已修复】使用 safeDbValue 包裹所有可能传对象的字段
       await env.DB.prepare(
         `INSERT INTO books (id,title,status,master_outline,volume_outline,core_settings,power_system,
          planes,current_plane,style_prompt_override,next_chapter,target_chapters,total_chars,cursor_volume,created_at,updated_at)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,0,?,?)`
-      ).bind(id, b.title || "未命名", "paused", b.master_outline ?? "", b.volume_outline ?? "[]",
-        b.core_settings ?? "", b.power_system ?? "", b.planes ?? "", b.current_plane ?? "",
-        b.style_prompt_override ?? "", b.start_chapter ?? 1, b.target_chapters ?? 800, now(), now()).run();
+      ).bind(id, safeDbValue(b.title, "未命名"), "paused", safeDbValue(b.master_outline),
+        safeDbValue(b.volume_outline, "[]"), safeDbValue(b.core_settings),
+        safeDbValue(b.power_system), safeDbValue(b.planes), safeDbValue(b.current_plane),
+        safeDbValue(b.style_prompt_override), b.start_chapter ?? 1, b.target_chapters ?? 800, now(), now()).run();
       return json({ id });
     }
     const mBook = p.match(/^\/api\/books\/([^/]+)$/);
@@ -82,7 +95,11 @@ export async function api(req: Request, env: Env, ctx: ExecutionContext): Promis
         const b = await req.json<any>();
         const fields = ["title", "master_outline", "volume_outline", "core_settings", "power_system", "planes", "current_plane", "style_prompt_override", "target_chapters", "next_chapter"];
         const sets: string[] = []; const vals: any[] = [];
-        for (const f of fields) if (f in b) { sets.push(`${f}=?`); vals.push(b[f]); }
+        for (const f of fields) if (f in b) { 
+          sets.push(`${f}=?`); 
+          // 【已修复】更新时也可能传入对象/数组，必须序列化
+          vals.push(safeDbValue(b[f])); 
+        }
         if (!sets.length) return err("nothing to update");
         vals.push(now(), id);
         await env.DB.prepare(`UPDATE books SET ${sets.join(",")}, updated_at=? WHERE id=?`).bind(...vals).run();
@@ -281,10 +298,11 @@ export async function api(req: Request, env: Env, ctx: ExecutionContext): Promis
     if (p === "/api/prompts" && req.method === "POST") {
       const b = await req.json<any>(); // {scope, book_id?, name, template}
       const id = b.scope === "book" ? `${b.book_id}:${b.name}` : `global:${b.name}`;
+      // 【已修复】确保 template 内容如果是对象或数组也能安全存入
       await env.DB.prepare(
         `INSERT INTO prompts (id,scope,book_id,name,template,updated_at) VALUES (?,?,?,?,?,?)
          ON CONFLICT(id) DO UPDATE SET template=excluded.template, updated_at=excluded.updated_at`
-      ).bind(id, b.scope, b.book_id ?? null, b.name, b.template, now()).run();
+      ).bind(id, b.scope, b.book_id ?? null, b.name, safeDbValue(b.template), now()).run();
       return json({ id });
     }
 
