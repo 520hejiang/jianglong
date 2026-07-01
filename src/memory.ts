@@ -6,6 +6,7 @@
 // ============================================================================
 import type {
   Env, Book, CharacterState, Foreshadow, StateDelta, Volume, Assets,
+  LoreEntry, LoreKind, GraphEdge,
 } from "./types";
 import { emptyAssets } from "./types";
 
@@ -48,6 +49,8 @@ function rowToChar(row: any): CharacterState {
     techniques: safeArr(row.techniques), movement_arts: safeArr(row.movement_arts),
     artifacts: safeArr(row.artifacts), assets: safeAssets(row.assets),
     relations: safeArr(row.relations), status_notes: row.status_notes ?? "",
+    personality_traits: row.personality_traits ?? "", speech_pattern: row.speech_pattern ?? "",
+    secrets: row.secrets ?? "", goals: row.goals ?? "",
     last_seen_ch: row.last_seen_ch ?? 0, last_breakthrough_ch: row.last_breakthrough_ch ?? 0,
   };
 }
@@ -67,26 +70,106 @@ export async function upsertCharacter(env: Env, bookId: string, c: Partial<Chara
     await env.DB.prepare(
       `UPDATE characters SET aliases=?, role=?, alive=?, realm_index=?, realm_name=?, realm_sub=?,
        techniques=?, movement_arts=?, artifacts=?, assets=?, relations=?, status_notes=?,
+       personality_traits=?, speech_pattern=?, secrets=?, goals=?,
        last_seen_ch=?, last_breakthrough_ch=?, updated_at=?
        WHERE book_id=? AND name=?`
     ).bind(
       J(merged.aliases), merged.role, merged.alive ? 1 : 0, merged.realm_index, merged.realm_name,
       merged.realm_sub, J(merged.techniques), J(merged.movement_arts), J(merged.artifacts),
-      J(merged.assets), J(merged.relations), merged.status_notes, merged.last_seen_ch,
-      merged.last_breakthrough_ch, now(), bookId, c.name
+      J(merged.assets), J(merged.relations), merged.status_notes,
+      merged.personality_traits ?? "", merged.speech_pattern ?? "", merged.secrets ?? "", merged.goals ?? "",
+      merged.last_seen_ch, merged.last_breakthrough_ch, now(), bookId, c.name
     ).run();
   } else {
     await env.DB.prepare(
       `INSERT INTO characters (id,book_id,name,aliases,role,alive,realm_index,realm_name,realm_sub,
-       techniques,movement_arts,artifacts,assets,relations,status_notes,last_seen_ch,last_breakthrough_ch,updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+       techniques,movement_arts,artifacts,assets,relations,status_notes,
+       personality_traits,speech_pattern,secrets,goals,last_seen_ch,last_breakthrough_ch,updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
     ).bind(
       uid(), bookId, c.name, J(c.aliases ?? []), c.role ?? "npc", c.alive === false ? 0 : 1,
       c.realm_index ?? 0, c.realm_name ?? "", c.realm_sub ?? 0, J(c.techniques ?? []),
       J(c.movement_arts ?? []), J(c.artifacts ?? []), J(c.assets ?? emptyAssets()),
-      J(c.relations ?? []), c.status_notes ?? "", c.last_seen_ch ?? 0, c.last_breakthrough_ch ?? 0, now()
+      J(c.relations ?? []), c.status_notes ?? "",
+      c.personality_traits ?? "", c.speech_pattern ?? "", c.secrets ?? "", c.goals ?? "",
+      c.last_seen_ch ?? 0, c.last_breakthrough_ch ?? 0, now()
     ).run();
   }
+}
+
+// ---------------- 设定卡（五层记忆·数据库层） ----------------
+// 势力/地点/神器/神通/事件/世界规则各一类卡片；写入时按 (kind,name) upsert，
+// detail 用最新的覆盖但保留首次出现章，保证"第 1 章的设定 2000 章后原样召回"。
+export async function upsertLore(env: Env, bookId: string, e: {
+  kind: LoreKind; name: string; detail: string; tags?: string[]; importance?: number; status?: string;
+}, ch: number) {
+  const existing = await env.DB.prepare(
+    "SELECT id, tags, importance, first_ch FROM lore WHERE book_id=? AND kind=? AND name=?"
+  ).bind(bookId, e.kind, e.name).first<any>();
+  if (existing) {
+    const tags = Array.from(new Set([...safeArr(existing.tags), ...(e.tags || [])]));
+    await env.DB.prepare(
+      "UPDATE lore SET detail=?, tags=?, last_ch=?, importance=?, status=?, updated_at=? WHERE id=?"
+    ).bind(e.detail, J(tags), ch, Math.max(existing.importance ?? 2, e.importance ?? 2),
+      e.status ?? "", now(), existing.id).run();
+  } else {
+    await env.DB.prepare(
+      `INSERT INTO lore (id,book_id,kind,name,detail,tags,first_ch,last_ch,importance,status,updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+    ).bind(uid(), bookId, e.kind, e.name, e.detail, J(e.tags ?? []), ch, ch,
+      e.importance ?? 2, e.status ?? "", now()).run();
+  }
+}
+
+// 按实体名/标签召回设定卡：名字精确命中优先，其次标签命中；核心设定(importance=3)优先。
+export async function relevantLore(env: Env, bookId: string, entities: string[], limit = 12): Promise<LoreEntry[]> {
+  if (!entities.length) return [];
+  const qs = entities.map(() => "?").join(",");
+  const byName = await env.DB.prepare(
+    `SELECT * FROM lore WHERE book_id=? AND name IN (${qs}) ORDER BY importance DESC LIMIT ?`
+  ).bind(bookId, ...entities, limit).all<any>();
+  const hits = new Map<string, any>((byName.results ?? []).map((r) => [r.id, r]));
+  if (hits.size < limit) {
+    // 标签匹配：LIKE 兜底（tags 是 JSON 数组文本，含实体名即命中）
+    for (const ent of entities) {
+      if (hits.size >= limit) break;
+      const r = await env.DB.prepare(
+        `SELECT * FROM lore WHERE book_id=? AND tags LIKE ? ORDER BY importance DESC, last_ch DESC LIMIT 4`
+      ).bind(bookId, `%${ent}%`).all<any>();
+      for (const row of r.results ?? []) if (hits.size < limit) hits.set(row.id, row);
+    }
+  }
+  return Array.from(hits.values()).map((r) => ({ ...r, tags: safeArr(r.tags) })) as LoreEntry[];
+}
+
+// 大事记：最近的重大事件（kind=event），按发生章倒序，构成时间线
+export async function recentEvents(env: Env, bookId: string, n = 8): Promise<LoreEntry[]> {
+  const r = await env.DB.prepare(
+    "SELECT * FROM lore WHERE book_id=? AND kind='event' ORDER BY first_ch DESC LIMIT ?"
+  ).bind(bookId, n).all<any>();
+  return (r.results ?? []).map((x) => ({ ...x, tags: safeArr(x.tags) })) as LoreEntry[];
+}
+
+// ---------------- 知识图谱 ----------------
+export async function upsertEdges(env: Env, bookId: string, edges: { src: string; dst: string; rel: string; note?: string }[], ch: number) {
+  for (const e of edges) {
+    if (!e.src || !e.dst || !e.rel) continue;
+    await env.DB.prepare(
+      `INSERT INTO graph_edges (book_id,src,dst,rel,note,updated_ch,updated_at) VALUES (?,?,?,?,?,?,?)
+       ON CONFLICT(book_id,src,dst,rel) DO UPDATE SET note=excluded.note, updated_ch=excluded.updated_ch, updated_at=excluded.updated_at`
+    ).bind(bookId, e.src, e.dst, e.rel, e.note ?? "", ch, now()).run();
+  }
+}
+
+// 取与给定实体直接相连的关系边（一跳邻居），写作前先查"他认识谁、恨谁、属于谁"
+export async function edgesFor(env: Env, bookId: string, entities: string[], limit = 20): Promise<GraphEdge[]> {
+  if (!entities.length) return [];
+  const qs = entities.map(() => "?").join(",");
+  const r = await env.DB.prepare(
+    `SELECT * FROM graph_edges WHERE book_id=? AND (src IN (${qs}) OR dst IN (${qs}))
+     ORDER BY updated_ch DESC LIMIT ?`
+  ).bind(bookId, ...entities, ...entities, limit).all<any>();
+  return (r.results ?? []) as GraphEdge[];
 }
 
 // ---------------- Plot state ----------------
@@ -105,8 +188,9 @@ export async function setPlot(env: Env, bookId: string, key: string, value: unkn
 
 // ---------------- Foreshadowing ----------------
 export async function openForeshadowing(env: Env, bookId: string): Promise<Foreshadow[]> {
+  // 【核心修改】：过滤掉冷宫(cold_storage)状态的伏笔，避免挤占单章 Token
   const r = await env.DB.prepare(
-    "SELECT * FROM foreshadowing WHERE book_id=? AND status!='resolved' AND status!='dropped' ORDER BY importance DESC"
+    "SELECT * FROM foreshadowing WHERE book_id=? AND status NOT IN ('resolved', 'dropped', 'cold_storage') ORDER BY importance DESC"
   ).bind(bookId).all<any>();
   return (r.results ?? []) as Foreshadow[];
 }
@@ -147,18 +231,68 @@ export async function recentOpenings(env: Env, bookId: string, n = 5): Promise<s
   }).filter(Boolean);
 }
 
-// 无 Vectorize 的"记忆检索"：按 tag 关键词在历史章节 summary/tags 里匹配，取最相关的几条。
+// 🛡️【RAG 检索】倒排索引版：chapter_tags 表按标签直查相关章节号（索引级查询，
+// 五百万字/几千章也不全表扫描），再取这些章的摘要按命中数排序。
+// 补一层"最近 200 章摘要模糊匹配"兜底，覆盖老库标签未回填/标签口径不一的情况。
 export async function retrieveRelevant(env: Env, bookId: string, tags: string[], limit = 5): Promise<{ chapter_no: number; summary: string }[]> {
   if (!tags.length) return [];
-  const r = await env.DB.prepare(
-    "SELECT chapter_no, summary, tags FROM chapters WHERE book_id=? AND status='done' ORDER BY chapter_no DESC LIMIT 400"
+  const score = new Map<number, number>();
+  // 1) 倒排索引精确命中（含第 1 章埋的伏笔，多少章后都能召回）
+  const qs = tags.map(() => "?").join(",");
+  const idx = await env.DB.prepare(
+    `SELECT chapter_no, COUNT(*) c FROM chapter_tags WHERE book_id=? AND tag IN (${qs})
+     GROUP BY chapter_no ORDER BY c DESC, chapter_no ASC LIMIT 30`
+  ).bind(bookId, ...tags).all<{ chapter_no: number; c: number }>();
+  for (const row of idx.results ?? []) score.set(row.chapter_no, row.c * 2);
+  // 2) 近期章节摘要模糊匹配兜底（固定窗口，不随书变长而变慢）
+  const recent = await env.DB.prepare(
+    "SELECT chapter_no, summary, tags FROM chapters WHERE book_id=? AND status='done' ORDER BY chapter_no DESC LIMIT 200"
   ).bind(bookId).all<any>();
-  const scored = (r.results ?? []).map((row) => {
+  for (const row of recent.results ?? []) {
     const t: string[] = safeArr(row.tags);
-    const score = tags.reduce((acc, tag) => acc + (t.includes(tag) ? 2 : (row.summary || "").includes(tag) ? 1 : 0), 0);
-    return { chapter_no: row.chapter_no, summary: row.summary || "", score };
-  });
-  return scored.filter((s) => s.score > 0).sort((a, b) => b.score - a.score).slice(0, limit);
+    const s = tags.reduce((acc, tag) => acc + (t.includes(tag) ? 2 : (row.summary || "").includes(tag) ? 1 : 0), 0);
+    if (s > 0) score.set(row.chapter_no, Math.max(score.get(row.chapter_no) ?? 0, s));
+  }
+  const top = Array.from(score.entries()).sort((a, b) => b[1] - a[1]).slice(0, limit).map(([no]) => no);
+  if (!top.length) return [];
+  const qs2 = top.map(() => "?").join(",");
+  const rows = await env.DB.prepare(
+    `SELECT chapter_no, summary FROM chapters WHERE book_id=? AND status='done' AND chapter_no IN (${qs2})
+     GROUP BY chapter_no`
+  ).bind(bookId, ...top).all<{ chapter_no: number; summary: string }>();
+  const byNo = new Map((rows.results ?? []).map((r) => [r.chapter_no, r.summary || ""]));
+  return top.filter((no) => byNo.has(no)).map((no) => ({ chapter_no: no, summary: byNo.get(no)! }));
+}
+
+// 把本章标签写进倒排索引（saveChapter 时调用）
+export async function indexChapterTags(env: Env, bookId: string, chapterNo: number, tags: string[]) {
+  for (const tag of Array.from(new Set(tags)).slice(0, 16)) {
+    if (!tag || !tag.trim()) continue;
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO chapter_tags (book_id,tag,chapter_no) VALUES (?,?,?)"
+    ).bind(bookId, tag.trim(), chapterNo).run();
+  }
+}
+
+// 老库标签回填：把已完成章节的 tags 批量灌进倒排索引（升级后跑一次即可）
+export async function backfillChapterTags(env: Env, bookId: string): Promise<number> {
+  const r = await env.DB.prepare(
+    "SELECT chapter_no, tags FROM chapters WHERE book_id=? AND status='done'"
+  ).bind(bookId).all<any>();
+  let n = 0;
+  for (const row of r.results ?? []) {
+    const tags: string[] = safeArr(row.tags);
+    if (tags.length) { await indexChapterTags(env, bookId, row.chapter_no, tags); n++; }
+  }
+  return n;
+}
+
+// 最近 n 章摘要（滚动短期记忆层，防止只看上一章导致中期剧情漂移）
+export async function recentSummaries(env: Env, bookId: string, n = 10): Promise<{ chapter_no: number; summary: string }[]> {
+  const r = await env.DB.prepare(
+    "SELECT chapter_no, summary FROM chapters WHERE book_id=? AND status='done' ORDER BY chapter_no DESC LIMIT ?"
+  ).bind(bookId, n).all<{ chapter_no: number; summary: string }>();
+  return (r.results ?? []).reverse();
 }
 
 export async function saveChapter(env: Env, bookId: string, ch: {
@@ -173,6 +307,7 @@ export async function saveChapter(env: Env, bookId: string, ch: {
     uid(), bookId, ch.chapter_no, ch.title, ch.outline, ch.content, ch.summary,
     ch.ending_tail, J(ch.tags), ch.word_count, ch.version, ch.qc_report, now()
   ).run();
+  await indexChapterTags(env, bookId, ch.chapter_no, ch.tags);
 }
 
 // ---------------- Logs ----------------
@@ -182,9 +317,9 @@ export async function log(env: Env, p: { bookId?: string; chapterNo?: number; le
   ).bind(uid(), p.bookId ?? null, p.chapterNo ?? null, p.level ?? "info", p.stage ?? null, p.message, J(p.meta ?? null), now()).run();
 }
 
-// ---------------- 并发锁（KV）：同一本书同一时刻只跑一章 ----------------
+// ---------------- 并发锁（KV） ----------------
 export async function acquireLock(env: Env, bookId: string, ttlSec = 120): Promise<boolean> {
-  const key = `genlock:${bookId}`; // 新前缀：忽略旧版可能残留的长 TTL 锁
+  const key = `genlock:${bookId}`;
   const cur = await env.KV.get(key);
   if (cur) return false;
   await env.KV.put(key, String(now()), { expirationTtl: Math.max(60, ttlSec) });
@@ -194,7 +329,29 @@ export async function releaseLock(env: Env, bookId: string) {
   await env.KV.delete(`genlock:${bookId}`);
 }
 
-// ---------------- 上下文编译：把世界状态压成喂给 LLM 的紧凑文本 ----------------
+// ---------------- 上下文编译：分层记忆 ----------------
+// 🛡️【核心防遗忘修复】：新增获取近期关键配角与地点的辅助函数（防止大模型在500万字后把同一个人名字记混）
+function compileRecentSceneContext(chars: CharacterState[], relevant: { chapter_no: number; summary: string }[]): string {
+  // 捞取最近 100 章内出场的配角（非主角），按出场时间倒序防止遗忘
+  const recentSideChars = chars
+    .filter(c => c.role !== 'protagonist' && c.alive && c.last_seen_ch > 0)
+    .sort((a, b) => (b.last_seen_ch || 0) - (a.last_seen_ch || 0))
+    .slice(0, 10)
+    .map(c => `- ${c.name}（身份：${c.role}，境界：${c.realm_name}，上次出现于：第${c.last_seen_ch}章）`)
+    .join('\n') || '（无近期出场配角）';
+
+  // 尝试从历史摘要中提取出高频出现的“地点”，强塞进去，防主角在500万章后地名人名错乱
+  const recentLocations = Array.from(new Set(
+    (relevant || []).flatMap(r => {
+      const summary = r.summary || '';
+      const locMatch = summary.match(/[（(]?(?:位于|来到|身处|抵达|在|于)([^，,。、！？)]{1,15}[城/山/谷/府/殿/岛])[）)]?/);
+      return locMatch ? [locMatch[1]] : [];
+    })
+  )).slice(0, 8).join('、') || '（无近期关键地点）';
+  
+  return `【近期关键配角（近100章内出场）】\n${recentSideChars}\n【近期活跃地点】\n${recentLocations}`;
+}
+
 export function compileMemoryContext(p: {
   chars: CharacterState[];
   fores: Foreshadow[];
@@ -204,44 +361,142 @@ export function compileMemoryContext(p: {
   lastSummary: string;
   lastTail: string;
   currentPlane?: string | null;
+  storyDigest?: string;
+  lore?: LoreEntry[];                                    // 本章相关设定卡（势力/神器/神通/地点/规则）
+  edges?: GraphEdge[];                                   // 本章相关关系网（知识图谱一跳邻居）
+  events?: LoreEntry[];                                  // 近期大事记（时间线）
+  recentSums?: { chapter_no: number; summary: string }[]; // 最近10章摘要（滚动短期记忆）
 }): string {
+  // 截断函数：法宝、功法、丹药等永远只列前 15 个，防止上下文被堆爆
+  const truncateList = (arr: any[], label: string): string => {
+    if (!arr || arr.length === 0) return '无';
+    const s = arr.slice(0, 15).map((t) => `${t.name}${t.layer !== undefined ? `(${t.layer}/${t.maxLayer}层)` : `[${t.grade || ''}]`}`).join('、');
+    return s + (arr.length > 15 ? `，及其他 ${arr.length - 15} 种${label}` : '');
+  };
+
+  // 角色按"主角优先→最近出场优先"排序后封顶 25，长期不出场的路人自然被挤出（防膨胀）
   const charLines = p.chars
     .filter((c) => c.role === "protagonist" || c.alive)
+    .sort((a, b) => (a.role === "protagonist" ? -1 : b.role === "protagonist" ? 1 : (b.last_seen_ch || 0) - (a.last_seen_ch || 0)))
     .slice(0, 25)
     .map((c) => {
-      const tech = c.techniques.map((t) => `${t.name}(${t.layer}/${t.maxLayer}层)`).join("、");
-      const move = (c.movement_arts || []).map((m) => `${m.name}[${m.kind}]`).join("、");
-      const arts = c.artifacts.map((a) => `${a.name}[${a.grade},耐久${a.durability}]`).join("、");
-      return `- ${c.name}${c.aliases.length ? `(${c.aliases.join("/")})` : ""}｜${c.role}｜${c.alive ? "在世" : "已死"}｜境界:${c.realm_name}${c.realm_sub}层(序${c.realm_index})｜功法:${tech || "无"}｜身法/神通:${move || "无"}｜法宝:${arts || "无"}｜近况:${c.status_notes || "—"}`;
+      const persona = [
+        c.personality_traits && `性格:${c.personality_traits}`,
+        c.speech_pattern && `口癖:${c.speech_pattern}`,
+        c.goals && `目标:${c.goals}`,
+        c.secrets && `秘密:${c.secrets}`,
+      ].filter(Boolean).join("｜");
+      return `- ${c.name}${c.aliases.length ? `(${c.aliases.join("/")})` : ""}｜${c.role}｜${c.alive ? "在世" : "已死"}｜境界:${c.realm_name}${c.realm_sub}层｜功法:${truncateList(c.techniques, '功法')}｜近况:${c.status_notes || "—"}${persona ? `｜${persona}` : ""}`;
     }).join("\n");
 
-  // 主角家底单列，强约束"只能花已有的、只能用已习得的"
+  // 主角家底单列，同样做“前15种”防膨胀
   const hero = p.chars.find((c) => c.role === "protagonist");
   const heroAssets = hero ? (() => {
     const a = hero.assets || { spirit_stones: 0, pills: [], materials: [], misc: [] };
-    const pills = (a.pills || []).map((x) => `${x.name}×${x.count}`).join("、") || "无";
-    const mats = (a.materials || []).map((x) => `${x.name}×${x.count}`).join("、") || "无";
-    const move = (hero.movement_arts || []).map((m) => `${m.name}[${m.kind}]`).join("、") || "无";
-    return `主角「${hero.name}」当前家底——灵石:${a.spirit_stones}｜丹药:${pills}｜材料:${mats}｜杂项:${(a.misc || []).join("、") || "无"}\n主角已习得身法/神通/秘术:${move}（本章只能动用此清单内能力，新能力须经剧情习得并交代来历）`;
+    const pills = truncateList(a.pills || [], '丹药');
+    const mats = truncateList(a.materials || [], '材料');
+    const move = truncateList(hero.movement_arts || [], '身法/神通');
+    return `主角「${hero.name}」当前家底——灵石:${a.spirit_stones}｜丹药:${pills}｜材料:${mats}\n主角已习得身法/神通:${move}（本章只能动用此清单内能力，新能力须经剧情习得并交代来历）`;
   })() : "（无主角记录）";
 
-  const foreLines = p.fores.slice(0, 20).map(
-    (f) => `- [${f.status}|重要度${f.importance}|建议第${f.due_ch}章前回收] ${f.title}：${f.detail}`
-  ).join("\n");
+  // 伏笔按重要度→建议回收章排序，封顶 20（S 级硬记忆只留最关键的）
+  const foreLines = [...p.fores]
+    .sort((a, b) => (b.importance - a.importance) || ((a.due_ch || 9e9) - (b.due_ch || 9e9)))
+    .slice(0, 20)
+    .map((f) => `- [${f.status}|重要度${f.importance}|建议第${f.due_ch}章前回收] ${f.title}：${f.detail}`)
+    .join("\n");
 
   const relLines = p.relevant.map((r) => `- 第${r.chapter_no}章：${r.summary}`).join("\n");
+  const map40 = (p.exploredMap || []).slice(-40);
+
+  // 🛡️【核心防遗忘修复】：植入近期配角、近期地点、时间线进度，防大模型逻辑混淆
+  const sceneContext = compileRecentSceneContext(p.chars, p.relevant);
+  const progression = `【当前时间线】\n主角上次大境界突破于第 ${hero?.last_breakthrough_ch || 0} 章，当前处于 ${p.currentPlane || '凡界'}，主角境界 ${hero?.realm_name || '凡人'} 第 ${hero?.realm_sub || 0} 层`;
+
+  // 设定卡：势力/神器/神通/地点/世界规则（按相关度检索出的本章会用到的卡）
+  const kindLabel: Record<string, string> = {
+    faction: "势力", location: "地点", artifact: "神器/法宝", technique: "神通/功法", event: "事件", worldrule: "世界规则",
+  };
+  const loreLines = (p.lore || [])
+    .filter((l) => l.kind !== "event")
+    .map((l) => `- [${kindLabel[l.kind] || l.kind}] ${l.name}${l.status ? `(${l.status})` : ""}：${(l.detail || "").slice(0, 160)}（首见第${l.first_ch}章）`)
+    .join("\n");
+
+  // 关系网：知识图谱一跳邻居，写之前先知道"谁认识谁、谁恨谁、谁属于哪"
+  const edgeLines = (p.edges || [])
+    .map((e) => `- ${e.src} —[${e.rel}]→ ${e.dst}${e.note ? `（${e.note}）` : ""}`)
+    .join("\n");
+
+  // 大事记：时间线层，事件带发生章与影响
+  const eventLines = (p.events || [])
+    .map((ev) => `- 第${ev.first_ch}章「${ev.name}」${ev.status ? `[${ev.status}]` : ""}：${(ev.detail || "").slice(0, 120)}`)
+    .join("\n");
+
+  // 最近10章摘要：滚动短期记忆，防中期剧情漂移
+  const recentLines = (p.recentSums || [])
+    .map((r) => `- 第${r.chapter_no}章：${(r.summary || "").slice(0, 100)}`)
+    .join("\n");
 
   return [
+    `【全书前情提要（已压缩，长程主线记忆）】\n${p.storyDigest || "（暂无，靠前章节）"}`,
     `【当前位面】${p.currentPlane || "（未设/凡界）"}`,
     `【主线进度】\n${p.mainNode ? JSON.stringify(p.mainNode) : "（起始）"}`,
-    `【已探索地图/势力】\n${(p.exploredMap || []).join("、") || "（无）"}`,
-    `【主角家底与已习得能力（硬约束）】\n${heroAssets}`,
-    `【在世/关键角色状态】\n${charLines || "（暂无）"}`,
-    `【未了结伏笔/因果】\n${foreLines || "（无）"}`,
+    `【已探索地图/势力（近40）】\n${map40.join("、") || "（无）"}`,
+    `【主角家底与已习得能力（硬约束·面板为准）】\n${heroAssets}`,
+    `【在世/关键角色状态（按活跃度，最多25）】\n${charLines || "（暂无）"}`,
+    loreLines ? `【本章相关设定卡（硬设定·不得违背，神通克制关系以此为准）】\n${loreLines}` : "",
+    edgeLines ? `【相关人物/势力关系网（知识图谱）】\n${edgeLines}` : "",
+    eventLines ? `【大事记/时间线（近期重大事件及其影响）】\n${eventLines}` : "",
+    `【未了结伏笔/因果（按重要度，最多20）】\n${foreLines || "（无）"}`,
+    sceneContext,
+    progression,
     `【相关历史剧情（按相关度检索）】\n${relLines || "（无）"}`,
+    recentLines ? `【最近10章摘要（短期记忆，保持剧情连续）】\n${recentLines}` : "",
     `【上一章摘要】\n${p.lastSummary || "（这是第一章）"}`,
     `【上一章结尾原文（用于无缝衔接，勿重复其内容）】\n${p.lastTail || "（无）"}`,
-  ].join("\n\n");
+  ].filter(Boolean).join("\n\n");
+}
+
+// ---------------- 全书前情提要压缩 ----------------
+export async function updateStoryDigest(env: Env, bookId: string, uptoChapter: number, summarize: (oldDigest: string, recent: string) => Promise<string>): Promise<void> {
+  const old = (await getPlot(env, bookId, "story_digest")) || "";
+  
+  const r = await env.DB.prepare(
+    "SELECT chapter_no, summary FROM chapters WHERE book_id=? AND status='done' AND chapter_no<=? ORDER BY chapter_no DESC LIMIT 15"
+  ).bind(bookId, uptoChapter).all<{ chapter_no: number; summary: string }>();
+  
+  const recent = (r.results ?? []).reverse().map((x) => `第${x.chapter_no}章：${x.summary}`).join("\n");
+  if (!recent) return;
+  
+  try {
+    // 确保 old 是纯字符串
+    const oldStr = typeof old === 'string' ? old : JSON.stringify(old);
+    const digest = await summarize(oldStr, recent);
+    
+    if (digest && digest.trim()) {
+      // 【核心修改】：放宽 1200 字的死锁，提升到 3000，防止 LLM 过度删减早期主线
+      const newDigest = digest.trim().slice(0, 3000); 
+      await setPlot(env, bookId, "story_digest", newDigest);
+
+      // 【核心修改】：分卷防遗忘机制（每 100 章强制打一个“记忆锚点”归档）
+      if (uptoChapter > 0 && uptoChapter % 100 === 0) {
+        const volumeNo = Math.floor(uptoChapter / 100);
+        await setPlot(env, bookId, `volume_archive_${volumeNo}`, newDigest);
+        console.log(`[卷宗归档] 第 ${volumeNo} 卷 (至第${uptoChapter}章) 核心提要已永久保存为 volume_archive_${volumeNo}`);
+      }
+    }
+  } catch (error) { 
+    console.error(`[StoryDigest Error] 第 ${uptoChapter} 章前情提要压缩失败:`, error); 
+  }
+}
+
+// ---------------- 死线清理（自动归档过期伏笔） ----------------
+export async function pruneDeadThreads(env: Env, bookId: string, chapterNo: number): Promise<void> {
+  // 【核心修改】：过期的伏笔不再被 dropped 彻底抛弃，而是进入 cold_storage（冷宫）。
+  // 防止修仙文动辄上千章的长线伏笔（如炼气期拿到的神秘断剑）被自动系统彻底抹杀。
+  await env.DB.prepare(
+    "UPDATE foreshadowing SET status='cold_storage', updated_at=? WHERE book_id=? AND status NOT IN ('resolved','dropped','cold_storage') AND importance<=2 AND due_ch IS NOT NULL AND ?-due_ch>100"
+  ).bind(Date.now(), bookId, chapterNo).run();
 }
 
 // ---- helpers ----

@@ -15,6 +15,7 @@ textarea { width: 100%; font-family: ui-monospace, monospace; }
 label { display: block; margin: 8px 0; font-size: 13px; color: #aab2c0; }
 button { background: #3b82f6; color: #fff; border: none; padding: 8px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; }
 button:hover { opacity: .9; }
+button.danger { background: #dc2626; }
 .row { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
 .hint { color: #6b7383; font-size: 12px; }
 .card { background: #161922; border: 1px solid #262b36; border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }

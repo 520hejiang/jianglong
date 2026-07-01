@@ -16,7 +16,7 @@ crons = ["* * * * *"]
 [[d1_databases]]
 binding = "DB"
 database_name = "he"
-database_id = "1d34e00f-c187-4cb8-b0e2-df0a6c8bc3c5"
+database_id = "12fb1dd5-b23a-4003-9565-f461d874114b"
 
 # --- KV：运行态开关 / 锁 / 限流计数 / 每日统计 ---
 [[kv_namespaces]]
@@ -39,10 +39,10 @@ id = "aec17942ebb2417fb77cf0d8e3effc3a"
 
 # --- 普通变量（非机密）。机密用 `wrangler secret put` 注入 ---
 [vars]
-DEEPSEEK_MODEL = "deepseek-v4-flash"
-DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-TARGET_CHARS_MIN = "2500"
-TARGET_CHARS_MAX = "3000"
+DEEPSEEK_MODEL = "mimo-v2.5"
+DEEPSEEK_BASE_URL = "https://opencode.ai/zen/go/v1"
+TARGET_CHARS_MIN = "1200"
+TARGET_CHARS_MAX = "1700"
 MAX_CONTEXT_TOKENS = "60000"   # 按官方最大上下文留余量，可在 dashboard 调整
 MIN_BREAKTHROUGH_GAP = "20"    # 主角两次大境界突破最小章节间隔（防升级过快）
 POLISH_MODE = "always"         # always=每章都过"毒舌老编辑"润色(治AI味,质量优先) / auto=仅检出AI味时润(省钱) / off=不润

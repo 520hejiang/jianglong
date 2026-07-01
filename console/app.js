@@ -52,9 +52,11 @@ document.querySelectorAll("nav button").forEach((b) =>
 );
 
 // ---- 书架 ----
+let _bookTitles = {}; // id -> title，供删除/清空确认弹窗取书名（不经内联参数，避免引号注入）
 async function loadBooks() {
   if (!API) return;
   const books = await call("/api/books");
+  _bookTitles = Object.fromEntries(books.map((b) => [b.id, b.title]));
   const el = document.getElementById("bookList");
   el.innerHTML = books.map((b) => `
     <div class="card">
@@ -65,6 +67,9 @@ async function loadBooks() {
         <button onclick="startBook('${b.id}')">▶ 开始</button>
         <button onclick="stopBook('${b.id}')">⏸ 暂停</button>
         <button onclick="genOne('${b.id}')">⚡ 立即生成一章</button>
+        <button class="danger" onclick="resetBook('${b.id}')">🔧 重置生成</button>
+        <button class="danger" onclick="wipeBook('${b.id}')">🧨 清空重置</button>
+        <button class="danger" onclick="deleteBook('${b.id}')">☠️ 彻底删书</button>
         <code class="meta">${b.id}</code>
       </div>
     </div>`).join("") || "<p class='hint'>暂无书，点击「新建书」。</p>";
@@ -72,7 +77,43 @@ async function loadBooks() {
 }
 async function startBook(id) { await call(`/api/books/${id}/start`, { method: "POST" }); loadBooks(); }
 async function stopBook(id) { await call(`/api/books/${id}/stop`, { method: "POST" }); loadBooks(); }
-async function genOne(id) { await call(`/api/books/${id}/generate`, { method: "POST", body: "{}" }); alert("已入队，约1-2分钟后出章"); }
+async function genOne(id) { await call(`/api/books/${id}/generate`, { method: "POST", body: "{}" }); alert("已开始，约1-2分钟后出章"); }
+async function resetBook(id) {
+  if (!confirm("重置生成？会清掉卡住的生成/重写进度与锁，然后从下一章继续。已写好的章节不受影响。")) return;
+  try { await call(`/api/books/${id}/reset`, { method: "POST" }); alert("已重置，约1-2分钟后会重新开始生成"); loadBooks(); }
+  catch (e) { alert("重置失败：" + e); }
+}
+// 清空重置：删光本书全部内容回到第1章。三次确认防误触。
+async function wipeBook(id) {
+  const title = _bookTitles[id] || id;
+  if (!confirm(`【危险】清空《${title}》的全部内容？\n将删除所有章节、记忆、伏笔、剧情、日志，回到第1章从头开始。`)) return;
+  if (!confirm("第二次确认：此操作不可恢复！已经写好的所有章节都会被永久删除。确定继续？")) return;
+  const t = prompt('最后确认：请输入"清空"两个字以执行（输错或取消则不执行）：');
+  if (t !== "清空") { alert("已取消（未输入「清空」）"); return; }
+  try {
+    const r = await call(`/api/books/${id}/wipe`, { method: "POST" });
+    curChapter = null;
+    const ct = document.getElementById("chapterText"); if (ct) ct.textContent = "";
+    alert(`✅ 已清空并重置到第1章（恢复 ${r.reseeded || 0} 个初始角色）。\n去书架点「▶ 开始」即从头生成。`);
+    loadBooks();
+  } catch (e) { alert("清空失败：" + e); }
+}
+
+// 彻底删书：连书带一切记录从数据库里抹掉，不留一行（开新书前清场用）。三次确认防误触。
+async function deleteBook(id) {
+  const title = _bookTitles[id] || id;
+  if (!confirm(`【最高危险】彻底删除《${title}》？\n和"清空重置"不同——这本书本身、所有章节、角色、伏笔、设定卡、关系图谱、日志、单书Prompt 将从数据库里彻底抹掉，书架上不再存在这本书。`)) return;
+  if (!confirm("第二次确认：删了就是删了，没有任何恢复手段。确定继续？")) return;
+  const t = prompt('最后确认：请输入"删除"两个字以执行（输错或取消则不执行）：');
+  if (t !== "删除") { alert("已取消（未输入「删除」）"); return; }
+  try {
+    const r = await call(`/api/books/${id}`, { method: "DELETE" });
+    curChapter = null;
+    const ct = document.getElementById("chapterText"); if (ct) ct.textContent = "";
+    alert(`☠️ 已彻底删除《${r.deleted || title}》，数据库不留痕迹。`);
+    loadBooks();
+  } catch (e) { alert("删除失败：" + e); }
+}
 
 // 一键导入完整大纲 JSON（手机首选：含文风/位面/角色，无需电脑跑脚本）
 function openImport() {
@@ -96,6 +137,15 @@ async function doImport() {
 
 // ======================= 新书向导 =======================
 const WIZ_STEPS = ["基础·文风", "总纲·设定", "境界体系", "分卷大纲", "核心人物", "确认创建"];
+// 恐怖/诡秘流预设：以 style_prompt_override 注入，优先级压过默认修仙铁律
+const HORROR_STYLE = `【本书为恐怖/诡秘流，以下要求优先级最高】
+1. 恐怖靠"未知与暗示"而非血浆：先给违和细节（钟停了、邻居的笑维持太久、镜子里的自己慢半拍），让读者自己毛骨悚然；关键真相永远只揭一半。
+2. 克制怪异描写：怪异之物绝不写心理与拟人表情，只写反常识的物理细节（关节反折、无声张口、影子方向不对）。
+3. 规则恐怖优先：诡异遵循可被摸索的"规则"（不能回头、不能应答第三声呼唤），主角靠观察与试错求生，规则一旦确立绝不打破。
+4. 日常感是恐怖的地基：大量真实生活细节铺底，恐怖只在缝隙里渗出来；越平静的段落之后越吓人。
+5. 主角是普通人思维：会怕、会侥幸、会算计得失，靠谨慎和头脑活下来，不靠主角光环。
+6. 节奏：慢烧为主，每章至少一处寒意点、章末必留悬念钩子；忌连续高强度惊吓导致麻木。
+7. 死亡有分量：配角的死要有铺垫与代价，用后果吓人，不用尸体数量吓人。`;
 const FANREN_RANKS = [
   { name: "炼气", subLayers: 13 }, { name: "筑基", subLayers: 12 }, { name: "结丹", subLayers: 9 },
   { name: "元婴", subLayers: 9 }, { name: "化神", subLayers: 9 }, { name: "炼虚", subLayers: 9 },
@@ -220,7 +270,7 @@ function buildPayload() {
   const ranks = wiz.ranks.filter((r)=>r.name).map((r, i)=>({ index: i, name: r.name, subLayers: r.subLayers }));
   const vols = wiz.vols.map((v, i)=>({ ...v, vol: i + 1 }));
   const preset = document.getElementById("w_stylePreset").value;
-  const style = preset === "custom" ? v("w_style") : "";
+  const style = preset === "custom" ? v("w_style") : (preset === "horror" ? HORROR_STYLE : "");
   const book = {
     title: v("w_title") || "未命名",
     start_chapter: +v("w_start") || 1,
@@ -239,10 +289,6 @@ async function wizCreate() {
   if (!book.title) return alert("请填书名");
   try {
     const res = await call("/api/books", { method: "POST", body: JSON.stringify(book) });
-    // style_prompt_override 通过 PUT 写入（POST 建书未含该字段）
-    if (book.style_prompt_override) {
-      await call(`/api/books/${res.id}`, { method: "PUT", body: JSON.stringify({ style_prompt_override: book.style_prompt_override }) });
-    }
     if (chars.length) {
       chars.forEach(syncRealmIdxAll);
       await call(`/api/books/${res.id}/characters`, { method: "POST", body: JSON.stringify({ characters: chars }) });
@@ -281,9 +327,21 @@ function copyChapter() {
 }
 async function rewriteCurrent() {
   if (!curChapter) return alert("先打开一章");
-  if (!confirm(`重写第${curChapter.chapter_no}章？将生成新版本。`)) return;
+  if (!confirm(`重写第${curChapter.chapter_no}章？将用新文风覆盖本章正文（不新增、不改剧情）。`)) return;
   await call(`/api/books/${curChapter.bookId}/generate`, { method: "POST", body: JSON.stringify({ chapter: curChapter.chapter_no, rewrite: true }) });
-  alert("已入队重写");
+  alert("已开始重写，约几分钟后刷新本章即可看到覆盖后的新版");
+}
+async function deleteCurrent() {
+  if (!curChapter) return alert("先打开一章");
+  if (!confirm("确定要删除这一章吗？此操作不可恢复。")) return;
+  try {
+    await call(`/api/books/${curChapter.bookId}/chapters/${curChapter.chapter_no}`, { method: "DELETE" });
+    const bid = curChapter.bookId;
+    curChapter = null;
+    document.getElementById("chapterText").textContent = ""; // 清空阅读区
+    await loadChapters();                                    // 刷新左侧列表
+    alert("已删除");
+  } catch (e) { alert("删除失败：" + e); }
 }
 
 // ---- 记忆库 ----
@@ -296,9 +354,10 @@ function fmtAssets(a) {
 }
 async function loadMemory() {
   const id = document.getElementById("memBook").value; if (!id) return;
-  const [book, chars, fores, plot] = await Promise.all([
+  const [book, chars, fores, plot, lore, graph] = await Promise.all([
     call(`/api/books/${id}`), call(`/api/books/${id}/characters`),
     call(`/api/books/${id}/foreshadowing`), call(`/api/books/${id}/plot`),
+    call(`/api/books/${id}/lore`).catch(() => []), call(`/api/books/${id}/graph`).catch(() => []),
   ]);
   // 位面横幅
   const planes = pj(book.planes, []);
@@ -331,8 +390,26 @@ async function loadMemory() {
     <tr><th>状态</th><th>重要</th><th>埋/建议回收</th><th>标题</th></tr>
     ${fores.map((f)=>`<tr><td>${f.status}</td><td>${f.importance}</td><td>${f.planted_ch}/${f.due_ch}</td><td>${esc(f.title)}</td></tr>`).join("")}
   </table>`;
+  const kindNames = { faction:"势力", location:"地点", artifact:"神器", technique:"神通", event:"事件", worldrule:"规则" };
+  document.getElementById("loreList").innerHTML = lore.length ? `<table>
+    <tr><th>类</th><th>名</th><th>首见/近见</th><th>重要</th><th>状态</th><th>详情</th></tr>
+    ${lore.map((l)=>`<tr><td>${kindNames[l.kind]||l.kind}</td><td>${esc(l.name)}</td><td>${l.first_ch}/${l.last_ch}</td><td>${l.importance}</td><td>${esc(l.status||"")}</td><td class="hint" title="${esc(l.detail||"")}">${esc((l.detail||"").slice(0,60))}</td></tr>`).join("")}
+  </table>` : "<p class='hint'>（暂无设定卡，随章节生成自动积累）</p>";
+  document.getElementById("graphList").innerHTML = graph.length ? `<table>
+    <tr><th>起点</th><th>关系</th><th>终点</th><th>更新章</th><th>备注</th></tr>
+    ${graph.map((e)=>`<tr><td>${esc(e.src)}</td><td>→ ${esc(e.rel)} →</td><td>${esc(e.dst)}</td><td>${e.updated_ch}</td><td class="hint">${esc(e.note||"")}</td></tr>`).join("")}
+  </table>` : "<p class='hint'>（暂无关系边，随章节生成自动积累）</p>";
   document.getElementById("plotView").textContent = plot.map((p)=>`${p.key}: ${p.value}`).join("\n");
 }
+// 老书升级：把已有章节的标签回填进倒排索引（新章节自动索引，只需点一次）
+async function reindexBook() {
+  const id = document.getElementById("memBook").value; if (!id) return alert("先选一本书");
+  try {
+    const r = await call(`/api/books/${id}/reindex`, { method: "POST" });
+    alert(`✅ 已回填 ${r.indexed_chapters} 章的检索索引。以后历史剧情可被精准召回。`);
+  } catch (e) { alert("重建失败：" + e); }
+}
+
 async function saveChar(cid) {
   const assets = _assetCache[cid] || {spirit_stones:0,pills:[],materials:[],misc:[]};
   assets.spirit_stones = +document.getElementById("ss_"+cid).value || 0; // 手动修正灵石，保留丹药/材料
@@ -371,7 +448,8 @@ async function loadLogs() {
 
 // ---- helpers ----
 function v(id){ return document.getElementById(id).value.trim(); }
-function esc(s){ return String(s??"").replace(/[&<>]/g, (c)=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+// 转义引号防属性注入：LLM 生成的角色名/近况会进 value="..."，缺引号转义等于给后台开 XSS 口子
+function esc(s){ return String(s??"").replace(/[&<>"']/g, (c)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 function fillBookSelectors(books){
   if(!books){ return; }
   const opts = books.map((b)=>`<option value="${b.id}">${esc(b.title)}</option>`).join("");
