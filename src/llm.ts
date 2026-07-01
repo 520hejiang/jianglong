@@ -73,7 +73,17 @@ try {
   const snippet = rawText.length > 300 ? rawText.substring(0, 300) + "..." : rawText;
   throw new Error(`响应不是有效的 JSON。API 返回的原始内容: ${snippet}`);
 }
-
+// --- 插入这段诊断逻辑 ---
+    if (data?.error) {
+      throw new Error(`🚨 API 隐性错误: ${JSON.stringify(data.error)}`);
+    }
+    if (data?.result?.response) {
+      return { text: data.result.response, usage: data?.result?.usage };
+    }
+    if (!data?.choices?.[0]?.message) {
+      throw new Error(`🚨 接口回包格式异常，找不到 choices！真实回包是: ${rawText}`);
+    }
+    // --- 插入结束 ---
 const text: string = data?.choices?.[0]?.message?.content ?? "";
 return { text, usage: data?.usage };
     } catch (e) {
