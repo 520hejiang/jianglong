@@ -30,7 +30,7 @@ export async function chat(
     max_tokens: opts.maxTokens ?? 9192,
     stream: false,
   };
-  // if (opts.json) body.response_format = { type: "json_object" };
+// if (opts.json) body.response_format = { type: "json_object" };
 
   let lastErr: unknown;
   for (let attempt = 0; attempt < 3; attempt++) {
