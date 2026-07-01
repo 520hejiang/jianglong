@@ -82,6 +82,10 @@ export interface CharacterState {
   assets: Assets;
   relations: { name: string; type: string; attitude: string }[];
   status_notes: string;
+  personality_traits: string; // 性格底色（如"谨慎多疑、睚眦必报"），随剧情缓慢演化
+  speech_pattern: string;     // 口癖/说话方式（如"惜字如金，爱用反问"），保证台词区分度
+  secrets: string;            // 隐藏身份/不能忘的秘密（如"实为魔宗遗孤，左臂封印"）
+  goals: string;              // 当前目标（如"三年内筑基，查清灭门真凶"）
   last_seen_ch: number;
   last_breakthrough_ch: number;
 }
@@ -101,6 +105,35 @@ export interface Plane {
   name: string;
   min_realm: number;
   max_realm: number;
+}
+
+// ============================================================================
+// 设定卡（五层记忆的"数据库层"）：势力/地点/神器/神通/事件/世界规则，
+// 一张卡一个实体，按 tags 检索，写到 2000 章也能精准捞回第 1 章的设定。
+// ============================================================================
+export type LoreKind = "faction" | "location" | "artifact" | "technique" | "event" | "worldrule";
+
+export interface LoreEntry {
+  id: string;
+  book_id: string;
+  kind: LoreKind;
+  name: string;           // 实体名（如"天玄宗""混沌剑""叶辰被废"）
+  detail: string;         // 设定正文：外观/规则/克制关系/事件经过与影响
+  tags: string[];         // 检索标签（相关人物/地点/物品名）
+  first_ch: number;       // 首次出现章
+  last_ch: number;        // 最近提及章
+  importance: number;     // 1-3，3=核心设定永不淘汰
+  status: string;         // 事件用：ongoing/settled；物品用：intact/damaged/lost 等，自由文本
+}
+
+// 知识图谱边：人物-人物 / 人物-势力 / 势力-势力 的关系网
+export interface GraphEdge {
+  book_id: string;
+  src: string;   // 起点实体名
+  dst: string;   // 终点实体名
+  rel: string;   // 关系（师徒/仇敌/隶属/盟友/暗恋/血亲…）
+  note: string;  // 补充（因何结仇、恩情大小）
+  updated_ch: number;
 }
 
 export interface Foreshadow {
@@ -127,6 +160,10 @@ export interface ChapterOutline {
   foreshadow_resolve: string[]; // 本章拟回收伏笔
   power_notes: string;          // 战力边界提醒（谁能打过谁）
   hook: string;                 // 章末钩子
+  subplot: string;              // 本章推进的支线（人情线/暗线/日常线），与主线并行
+  breakthrough_due: boolean;    // 本章是否安排主角境界突破（须有契机铺垫，由细纲统筹）
+  battle_scale: "none" | "skirmish" | "major"; // 本章战斗规模：无/遭遇战/大战
+  battle_stages: string[];      // major 时必填：按七阶段拆解的战斗节拍（试探→神通→底牌→反转→生死一线→顿悟→绝杀，可裁剪但≥5段）
 }
 
 // 记忆更新增量（update 阶段由 LLM 抽取）
@@ -147,10 +184,18 @@ export interface StateDelta {
     add_materials?: { name: string; count: number }[];
     relations?: { name: string; type: string; attitude: string }[];
     status_notes?: string;
+    personality_traits?: string; // 性格有演化时更新（如经历大变后"多了狠戾"）
+    speech_pattern?: string;     // 口癖变化（一般不变）
+    secrets?: string;            // 隐藏身份/秘密有变化时更新
+    goals?: string;              // 当前目标有变化时更新
   }>;
   plane_change?: string; // 本章主角飞升/转换到的新位面名（如「灵界」），无则省略
   foreshadow_new: Array<{ title: string; detail: string; importance: number; due_ch?: number }>;
   foreshadow_update: Array<{ title: string; status: "developing" | "resolved" | "dropped" }>;
+  // 设定卡增量：本章新出现/有变化的势力/地点/神器/神通/事件/世界规则
+  lore: Array<{ kind: LoreKind; name: string; detail: string; tags?: string[]; importance?: number; status?: string }>;
+  // 关系图谱增量：本章确立或变化的实体关系
+  edges: Array<{ src: string; dst: string; rel: string; note?: string }>;
   plot: {
     main_node?: string;
     explored_map_add?: string[];

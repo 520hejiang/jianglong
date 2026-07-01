@@ -10,6 +10,7 @@
 import type { Env } from "./types";
 import { advanceBook, startRewrite } from "./pipeline";
 import { ensureSchema } from "./schema";
+import { backfillChapterTags } from "./memory";
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json", ...cors() } });
@@ -91,6 +92,19 @@ export async function api(req: Request, env: Env, ctx: ExecutionContext): Promis
         const b = await env.DB.prepare("SELECT * FROM books WHERE id=?").bind(id).first();
         return b ? json(b) : err("not found", 404);
       }
+      // 彻底删书：本书的一切（章节/角色/伏笔/剧情/设定卡/图谱/索引/日志/单书Prompt/锁/书本身）全部删光，
+      // 数据库里不留一行。开新书（玄幻/恐怖多本并行）前清场用。前端三次确认。
+      if (req.method === "DELETE") {
+        const b = await env.DB.prepare("SELECT title FROM books WHERE id=?").bind(id).first<{ title: string }>();
+        if (!b) return err("not found", 404);
+        for (const t of ["chapters", "foreshadowing", "characters", "plot_state", "lore", "graph_edges", "chapter_tags", "logs"]) {
+          await env.DB.prepare(`DELETE FROM ${t} WHERE book_id=?`).bind(id).run();
+        }
+        await env.DB.prepare("DELETE FROM prompts WHERE book_id=?").bind(id).run();
+        await env.DB.prepare("DELETE FROM books WHERE id=?").bind(id).run();
+        await env.KV.delete(`genlock:${id}`);
+        return json({ ok: true, deleted: b.title, note: "本书及全部关联数据已彻底删除" });
+      }
       if (req.method === "PUT") {
         const b = await req.json<any>();
         const fields = ["title", "master_outline", "volume_outline", "core_settings", "power_system", "planes", "current_plane", "style_prompt_override", "target_chapters", "next_chapter"];
@@ -141,7 +155,7 @@ export async function api(req: Request, env: Env, ctx: ExecutionContext): Promis
       // 取出初始角色快照，清空后重新植入
       const seedRow = await env.DB.prepare("SELECT value FROM plot_state WHERE book_id=? AND key='__char_seed'").bind(id).first<{ value: string }>();
       const seed: any[] = seedRow ? (JSON.parse(seedRow.value) || []) : [];
-      for (const t of ["chapters", "foreshadowing", "characters", "plot_state", "logs"]) {
+      for (const t of ["chapters", "foreshadowing", "characters", "plot_state", "lore", "graph_edges", "chapter_tags", "logs"]) {
         await env.DB.prepare(`DELETE FROM ${t} WHERE book_id=?`).bind(id).run();
       }
       await env.KV.delete(`genlock:${id}`);
@@ -253,6 +267,29 @@ export async function api(req: Request, env: Env, ctx: ExecutionContext): Promis
       return json(r.results ?? []);
     }
 
+    // ---- 记忆：设定卡 / 知识图谱 ----
+    const mLore = p.match(/^\/api\/books\/([^/]+)\/lore$/);
+    if (mLore && req.method === "GET") {
+      const r = await env.DB.prepare(
+        "SELECT * FROM lore WHERE book_id=? ORDER BY kind, importance DESC, last_ch DESC LIMIT 500"
+      ).bind(mLore[1]).all();
+      return json(r.results ?? []);
+    }
+    const mEdges = p.match(/^\/api\/books\/([^/]+)\/graph$/);
+    if (mEdges && req.method === "GET") {
+      const r = await env.DB.prepare(
+        "SELECT * FROM graph_edges WHERE book_id=? ORDER BY updated_ch DESC LIMIT 500"
+      ).bind(mEdges[1]).all();
+      return json(r.results ?? []);
+    }
+
+    // 老书升级用：把已有章节的 tags 回填进倒排索引（新章节写入时自动索引，无需再跑）
+    const mReindex = p.match(/^\/api\/books\/([^/]+)\/reindex$/);
+    if (mReindex && req.method === "POST") {
+      const n = await backfillChapterTags(env, mReindex[1]);
+      return json({ ok: true, indexed_chapters: n, note: "标签倒排索引已回填，历史章节可被RAG精准检索" });
+    }
+
     // ---- 章节 ----
     const mChaps = p.match(/^\/api\/books\/([^/]+)\/chapters$/);
     if (mChaps && req.method === "GET") {
@@ -276,6 +313,7 @@ export async function api(req: Request, env: Env, ctx: ExecutionContext): Promis
     if (mChap && req.method === "DELETE") {
       const bookId = mChap[1]; const no = parseInt(mChap[2], 10);
       await env.DB.prepare("DELETE FROM chapters WHERE book_id=? AND chapter_no=?").bind(bookId, no).run();
+      await env.DB.prepare("DELETE FROM chapter_tags WHERE book_id=? AND chapter_no=?").bind(bookId, no).run();
       const sum = await env.DB.prepare("SELECT COALESCE(SUM(word_count),0) w FROM chapters WHERE book_id=? AND status='done'").bind(bookId).first<{ w: number }>();
       await env.DB.prepare("UPDATE books SET total_chars=?, updated_at=? WHERE id=?").bind(sum?.w ?? 0, now(), bookId).run();
       await env.DB.prepare("INSERT INTO logs (id,book_id,chapter_no,level,stage,message,meta,created_at) VALUES (?,?,?,?,?,?,?,?)")

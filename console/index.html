@@ -62,6 +62,7 @@
           <label>文风预设
             <select id="w_stylePreset" onchange="onStylePreset()">
               <option value="fanren">凡人修仙传（硬核·谨慎·战力严谨）默认</option>
+              <option value="horror">恐怖/诡秘流（规则怪谈·慢烧·未知恐惧）</option>
               <option value="custom">自定义</option>
             </select>
           </label>
@@ -142,13 +143,18 @@
       <div class="row">
         <select id="memBook" onchange="loadMemory()"></select>
         <button onclick="loadMemory()">刷新</button>
-        <span class="hint">可直接修改角色生死/境界/灵石以人工防崩</span>
+        <button onclick="reindexBook()">🔎 重建检索索引</button>
+        <span class="hint">可直接修改角色生死/境界/灵石以人工防崩；老书升级后点一次「重建检索索引」即可启用精准记忆检索</span>
       </div>
       <div id="planeBanner" class="card" style="font-size:13px"></div>
       <h4>角色状态</h4>
       <div id="charList"></div>
       <h4>未了结伏笔</h4>
       <div id="foreList"></div>
+      <h4>设定卡（势力/地点/神器/神通/事件/规则）</h4>
+      <div id="loreList"></div>
+      <h4>关系图谱</h4>
+      <div id="graphList"></div>
       <h4>剧情状态</h4>
       <pre id="plotView"></pre>
     </section>

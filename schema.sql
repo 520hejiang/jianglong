@@ -86,6 +86,10 @@ CREATE TABLE IF NOT EXISTS characters (
   assets      TEXT,                            -- JSON：家底 {spirit_stones, pills:[{name,count}], materials:[{name,count}], misc:[]}
   relations   TEXT,                            -- JSON：人脉 [{name,type,attitude}]
   status_notes TEXT,                           -- 当前处境/伤势/秘密
+  personality_traits TEXT,                     -- 性格底色（随剧情缓慢演化）
+  speech_pattern TEXT,                         -- 口癖/说话方式（保证台词区分度）
+  secrets     TEXT,                            -- 隐藏身份/不能忘的秘密
+  goals       TEXT,                            -- 当前目标
   last_seen_ch INTEGER DEFAULT 0,
   last_breakthrough_ch INTEGER DEFAULT 0,      -- 上次大境界突破章，用于突破节奏校验
   updated_at  INTEGER NOT NULL,
@@ -122,6 +126,46 @@ CREATE TABLE IF NOT EXISTS foreshadowing (
 -- 索引：按书和状态查询活跃伏笔，以及按重要性排序
 CREATE INDEX IF NOT EXISTS idx_fore_book ON foreshadowing(book_id, status);
 CREATE INDEX IF NOT EXISTS idx_fore_importance ON foreshadowing(importance);
+
+-- ---------- 设定卡（五层记忆·数据库层） ----------
+-- 势力/地点/神器/神通/事件/世界规则，一张卡一个实体；tags 检索，2000 章后仍可精准召回。
+CREATE TABLE IF NOT EXISTS lore (
+  id          TEXT PRIMARY KEY,
+  book_id     TEXT NOT NULL,
+  kind        TEXT NOT NULL,                   -- faction | location | artifact | technique | event | worldrule
+  name        TEXT NOT NULL,                   -- 实体名（如"天玄宗""混沌剑""叶辰被废"）
+  detail      TEXT,                            -- 设定正文/事件经过与影响/神通克制关系
+  tags        TEXT,                            -- JSON 数组：关联实体标签
+  first_ch    INTEGER DEFAULT 0,               -- 首次出现章（事件即发生章=时间线）
+  last_ch     INTEGER DEFAULT 0,               -- 最近提及章
+  importance  INTEGER DEFAULT 2,               -- 1-3，3=核心设定永不淘汰
+  status      TEXT DEFAULT '',                 -- 事件:ongoing/settled；物品:intact/lost 等
+  updated_at  INTEGER NOT NULL,
+  UNIQUE(book_id, kind, name)
+);
+CREATE INDEX IF NOT EXISTS idx_lore_book ON lore(book_id, kind);
+
+-- ---------- 知识图谱（实体关系边） ----------
+CREATE TABLE IF NOT EXISTS graph_edges (
+  book_id     TEXT NOT NULL,
+  src         TEXT NOT NULL,                   -- 起点实体名
+  dst         TEXT NOT NULL,                   -- 终点实体名
+  rel         TEXT NOT NULL,                   -- 关系：师徒/仇敌/隶属/盟友…
+  note        TEXT,                            -- 因何结仇/恩情大小
+  updated_ch  INTEGER DEFAULT 0,
+  updated_at  INTEGER NOT NULL,
+  PRIMARY KEY (book_id, src, dst, rel)
+);
+CREATE INDEX IF NOT EXISTS idx_edges_dst ON graph_edges(book_id, dst);
+
+-- ---------- 章节标签倒排索引（RAG 检索加速） ----------
+-- 替代全表扫描：按标签直查相关章节号，五百万字规模下仍是索引级查询。
+CREATE TABLE IF NOT EXISTS chapter_tags (
+  book_id     TEXT NOT NULL,
+  tag         TEXT NOT NULL,
+  chapter_no  INTEGER NOT NULL,
+  PRIMARY KEY (book_id, tag, chapter_no)
+);
 
 -- ---------- 运行日志 ----------
 CREATE TABLE IF NOT EXISTS logs (

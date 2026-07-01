@@ -54,8 +54,11 @@ export async function chat(
         continue;
       }
       if (!res.ok) {
-  throw new Error(`LLM ${res.status}: ${await safeText(res)}`);
-}
+        // 4xx（密钥无效/参数错误）重试也不会好，直接失败，不空耗退避时间
+        const e: any = new Error(`LLM ${res.status}: ${await safeText(res)}`);
+        e.fatal = true;
+        throw e;
+      }
 
 // ★★★ 核心升级：先读纯文本，防止空内容直接崩掉 ★★★
 const rawText = await res.text();
@@ -86,8 +89,9 @@ try {
     // --- 插入结束 ---
 const text: string = data?.choices?.[0]?.message?.content ?? "";
 return { text, usage: data?.usage };
-    } catch (e) {
+    } catch (e: any) {
       lastErr = e;
+      if (e?.fatal) break; // 4xx 类错误重试无意义，立刻报出去
       await sleep(1000 * Math.pow(2, attempt));
     }
   }

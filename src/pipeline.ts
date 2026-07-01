@@ -86,8 +86,11 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
       const exploredMap: string[] = (await M.getPlot(env, bookId, "explored_map")) || [];
       const storyDigest: string = (await M.getPlot(env, bookId, "story_digest")) || "";
       const last = await M.lastChapter(env, bookId);
+      const recentSums = await M.recentSummaries(env, bookId, 10);
+      const events = await M.recentEvents(env, bookId, 8);
       const baseMem = M.compileMemoryContext({
         chars, fores, mainNode, exploredMap, relevant: [], currentPlane, storyDigest,
+        events, recentSums,
         lastSummary: last?.summary || "", lastTail: last?.ending_tail || "",
       });
       const extractRaw = await chat(env, [
@@ -97,9 +100,15 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
       let focus: any = {};
       try { focus = parseJson(extractRaw.text); } catch { focus = { must_use_entities: [] }; }
       await M.log(env, { bookId, chapterNo: ch, stage: "extract", message: `focus: ${focus.focus || "-"}`, meta: focus });
-      const relevant = await M.retrieveRelevant(env, bookId, focus.must_use_entities || [], 5);
+      // RAG：拿着本章焦点实体，先查倒排索引召回历史章节、再查设定卡与关系图谱，
+      // 只喂"最相关的几 KB"而不是整本书——写第 1827 章时混沌剑的所有旧设定都在
+      const entities: string[] = (focus.must_use_entities || []).filter((x: any) => typeof x === "string");
+      const relevant = await M.retrieveRelevant(env, bookId, entities, 5);
+      const lore = await M.relevantLore(env, bookId, entities, 12);
+      const edges = await M.edgesFor(env, bookId, entities, 20);
       const memory = M.compileMemoryContext({
         chars, fores, mainNode, exploredMap, relevant, currentPlane, storyDigest,
+        lore, edges, events, recentSums,
         lastSummary: last?.summary || "", lastTail: last?.ending_tail || "",
       });
       const ops = await M.recentOpenings(env, bookId, 5);
@@ -151,9 +160,10 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
       }) as any[];
 
       // =========================================================================
-      // 【核心安全墙】：绝对资产防穿透与指数级境界突破拦截
+      // 【核心安全墙】：绝对资产防穿透 + 境界突破"随剧情"拦截
       // =========================================================================
-      const heroName = chars.find(c => c.role === 'protagonist')?.name;
+      const outlineForCheck = JSON.parse(st.outlineJson!) as ChapterOutline;
+      const heroName = chars.find(x => x.role === 'protagonist')?.name;
       for (const cu of delta.characters) {
         if (!cu.name) continue;
         const prev = charMap.get(cu.name);
@@ -165,15 +175,21 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
               issues.push({ level: 'error', rule: '资产穿透', detail: `${cu.name} 灵石变动 ${cu.spirit_stones_delta} 会导致余额为负 (${newBalance})，绝不允许。` });
             }
           }
-          // 2. 指数级境界防崩：替换原有的死板线性限制
+          // 2. 境界突破随剧情走：细纲统筹安排(breakthrough_due)或正文有明确契机铺垫的突破放行；
+          //    未经细纲规划的"顿悟白给"才按指数级门槛拦截。首次突破(尚无记录)不误杀。
           if (cu.breakthrough || (cu.realm_index && cu.realm_index > prev.realm_index)) {
+            const plannedByOutline = !!outlineForCheck.breakthrough_due
+              || /突破|晋阶|晋升|进阶|结丹|筑基|凝婴|破境/.test(outlineForCheck.goal || "")
+              || (outlineForCheck.foreshadow_resolve || []).some(t => /突破|瓶颈|晋阶|契机/.test(t));
             const baseGap = c.minBreakthroughGap;
             const dynamicGap = Math.floor(baseGap * Math.pow(1.5, prev.realm_index || 0));
             const chaptersSince = ch - (prev.last_breakthrough_ch || 0);
-            
-            // 如果是主角，严格执行指数级门槛拦截
-            if (cu.name === heroName && chaptersSince < dynamicGap) {
-              issues.push({ level: 'error', rule: '节奏过快', detail: `主角突破至下一大境界需沉淀 ${dynamicGap} 章，当前仅过 ${chaptersSince} 章，强制拦截！` });
+
+            if (cu.name === heroName && prev.last_breakthrough_ch > 0 && !plannedByOutline && chaptersSince < dynamicGap) {
+              issues.push({ level: 'error', rule: '节奏过快', detail: `主角突破未经细纲规划且距上次仅 ${chaptersSince} 章（参考沉淀 ${dynamicGap} 章），疑似廉价顿悟，强制拦截！若剧情确需突破，应先在细纲 breakthrough_due 中统筹。` });
+            } else if (cu.name === heroName && plannedByOutline && chaptersSince < Math.max(3, Math.floor(baseGap / 4))) {
+              // 剧情规划的突破也不能背靠背：距上次突破不足 baseGap/4 章仍视为膨胀
+              issues.push({ level: 'error', rule: '节奏过快', detail: `主角距上次突破仅 ${chaptersSince} 章又要突破，哪怕剧情安排也过密，强制拦截。` });
             }
           }
         }
@@ -329,8 +345,9 @@ export async function startRewrite(env: Env, bookId: string, chapterNo: number):
 async function rewriteStep(env: Env, bookId: string, st: GenState): Promise<GenState> {
   const book = await M.getBook(env, bookId);
   if (!book) return { ...st, stage: "complete" };
+  // 基于最新版本重写（老版本作废删除），避免把上一次重写的成果又改回去
   const ex = await env.DB.prepare(
-    "SELECT id, title, content FROM chapters WHERE book_id=? AND chapter_no=? AND status='done' ORDER BY version ASC LIMIT 1"
+    "SELECT id, title, content FROM chapters WHERE book_id=? AND chapter_no=? AND status='done' ORDER BY version DESC LIMIT 1"
   ).bind(bookId, st.chapterNo).first<any>();
   if (!ex) {
     await M.log(env, { bookId, chapterNo: st.chapterNo, level: "warn", stage: "rewrite", message: "找不到原章节，无法重写" });
@@ -354,6 +371,12 @@ async function rewriteStep(env: Env, bookId: string, st: GenState): Promise<GenS
   await env.DB.prepare(
     "DELETE FROM chapters WHERE book_id=? AND chapter_no=? AND id<>?"
   ).bind(bookId, st.chapterNo, ex.id).run();
+  // 重写会改变字数，重算全书总字数
+  const sum = await env.DB.prepare(
+    "SELECT COALESCE(SUM(word_count),0) w FROM chapters WHERE book_id=? AND status='done'"
+  ).bind(bookId).first<{ w: number }>();
+  await env.DB.prepare("UPDATE books SET total_chars=?, updated_at=? WHERE id=?")
+    .bind(sum?.w ?? 0, Date.now(), bookId).run();
   await M.log(env, { bookId, chapterNo: st.chapterNo, stage: "rewrite", message: `第${st.chapterNo}章已重写覆盖，${wc}字` });
   return { ...st, stage: "complete", title, wc };
 }
@@ -399,6 +422,7 @@ async function extractDelta(env: Env, bookId: string, ch: number, text: string, 
     { role: "user", content: fill("【本章定稿】\n{{TEXT}}\n\n【当前世界状态】\n{{MEMORY}}", { TEXT: text, MEMORY: memory }) },
   ], { temperature: 0.2, maxTokens: 2000 });
   d.characters ??= []; d.foreshadow_new ??= []; d.foreshadow_update ??= [];
+  d.lore ??= []; d.edges ??= [];
   d.plot ??= {}; d.tags ??= []; d.summary ??= "";
   return d;
 }
@@ -427,11 +451,20 @@ async function applyDelta(env: Env, bookId: string, ch: number, d: StateDelta, b
         spirit_stones: cu.spirit_stones_delta ?? 0,
         pills: cu.add_pills ?? [], materials: cu.add_materials ?? [], misc: [],
       } } : {}),
-      // 【新增】动态更新人物性格和口癖
+      // 人物性格/口癖/秘密/目标随剧情演化（增量更新，不重新生成）
       ...(cu.personality_traits ? { personality_traits: cu.personality_traits } : {}),
       ...(cu.speech_pattern ? { speech_pattern: cu.speech_pattern } : {}),
+      ...(cu.secrets ? { secrets: cu.secrets } : {}),
+      ...(cu.goals ? { goals: cu.goals } : {}),
     });
   }
+  // 设定卡增量：势力/地点/神器/神通/事件/世界规则，按 (kind,name) upsert
+  const LORE_KINDS = new Set(["faction", "location", "artifact", "technique", "event", "worldrule"]);
+  for (const l of d.lore || []) {
+    if (l?.name && l?.kind && LORE_KINDS.has(l.kind)) await M.upsertLore(env, bookId, l, ch);
+  }
+  // 知识图谱增量：人物/势力关系边
+  if (d.edges?.length) await M.upsertEdges(env, bookId, d.edges, ch);
   if (d.plane_change) {
     await env.DB.prepare("UPDATE books SET current_plane=?, updated_at=? WHERE id=?")
       .bind(d.plane_change, Date.now(), bookId).run();

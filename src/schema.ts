@@ -24,9 +24,24 @@ const DDL: string[] = [
     id TEXT PRIMARY KEY, book_id TEXT NOT NULL, name TEXT NOT NULL, aliases TEXT, role TEXT,
     alive INTEGER NOT NULL DEFAULT 1, realm_index INTEGER NOT NULL DEFAULT 0, realm_name TEXT,
     realm_sub INTEGER DEFAULT 0, techniques TEXT, movement_arts TEXT, artifacts TEXT, assets TEXT,
-    relations TEXT, status_notes TEXT, last_seen_ch INTEGER DEFAULT 0,
+    relations TEXT, status_notes TEXT, personality_traits TEXT, speech_pattern TEXT,
+    secrets TEXT, goals TEXT, last_seen_ch INTEGER DEFAULT 0,
     last_breakthrough_ch INTEGER DEFAULT 0, updated_at INTEGER NOT NULL, UNIQUE(book_id, name))`,
   `CREATE INDEX IF NOT EXISTS idx_char_book ON characters(book_id)`,
+  `CREATE TABLE IF NOT EXISTS lore (
+    id TEXT PRIMARY KEY, book_id TEXT NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL,
+    detail TEXT, tags TEXT, first_ch INTEGER DEFAULT 0, last_ch INTEGER DEFAULT 0,
+    importance INTEGER DEFAULT 2, status TEXT DEFAULT '', updated_at INTEGER NOT NULL,
+    UNIQUE(book_id, kind, name))`,
+  `CREATE INDEX IF NOT EXISTS idx_lore_book ON lore(book_id, kind)`,
+  `CREATE TABLE IF NOT EXISTS graph_edges (
+    book_id TEXT NOT NULL, src TEXT NOT NULL, dst TEXT NOT NULL, rel TEXT NOT NULL,
+    note TEXT, updated_ch INTEGER DEFAULT 0, updated_at INTEGER NOT NULL,
+    PRIMARY KEY (book_id, src, dst, rel))`,
+  `CREATE INDEX IF NOT EXISTS idx_edges_dst ON graph_edges(book_id, dst)`,
+  `CREATE TABLE IF NOT EXISTS chapter_tags (
+    book_id TEXT NOT NULL, tag TEXT NOT NULL, chapter_no INTEGER NOT NULL,
+    PRIMARY KEY (book_id, tag, chapter_no))`,
   `CREATE TABLE IF NOT EXISTS plot_state (
     book_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT, updated_at INTEGER NOT NULL,
     PRIMARY KEY (book_id, key))`,
@@ -44,10 +59,21 @@ const DDL: string[] = [
     template TEXT NOT NULL, updated_at INTEGER NOT NULL)`,
 ];
 
+// 老库增量升级：SQLite 不支持 ADD COLUMN IF NOT EXISTS，逐条尝试、已存在则静默跳过
+const SOFT_ALTERS: string[] = [
+  `ALTER TABLE characters ADD COLUMN personality_traits TEXT`,
+  `ALTER TABLE characters ADD COLUMN speech_pattern TEXT`,
+  `ALTER TABLE characters ADD COLUMN secrets TEXT`,
+  `ALTER TABLE characters ADD COLUMN goals TEXT`,
+];
+
 let ensured = false; // 每个 isolate 只建一次
 
 export async function ensureSchema(env: Env): Promise<void> {
   if (ensured) return;
   for (const stmt of DDL) await env.DB.prepare(stmt).run();
+  for (const stmt of SOFT_ALTERS) {
+    try { await env.DB.prepare(stmt).run(); } catch { /* 列已存在 */ }
+  }
   ensured = true;
 }

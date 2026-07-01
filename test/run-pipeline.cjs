@@ -83,6 +83,11 @@ function makeDelta(ch) {
   const d = { characters: [cu], foreshadow_new: [], foreshadow_update: [], plot: { main_node: `第${ch}章主线推进` },
     summary: `第${ch}章：陆长安在暗巷黑吃黑，斩杀散修，收割精血与灵石。`, tags: ['陆长安', '暗巷', '黑吃黑', '玄元小鼎'] };
   if (ch === 3) d.foreshadow_new = [{ title: '神秘玉简', detail: '死者掉落的古老玉简，暂无法参透', importance: 3, due_ch: 18 }];
+  if (ch === 9) {
+    d.lore = [{ kind: 'artifact', name: '玄元小鼎', detail: '噬魂养鼎，吞魂血而长，克阴魂类，忌雷法', tags: ['陆长安'], importance: 3, status: 'intact' }];
+    d.edges = [{ src: '陆长安', dst: '黑水帮', rel: '仇敌', note: '暗巷黑吃黑结怨' }];
+  }
+  if (ch === 11) d.lore = [{ kind: 'event', name: '黑水帮堂主暴毙', detail: '陆长安暗杀黑水帮堂主，帮内震怒悬赏，坊市巡查趋严', tags: ['陆长安', '黑水帮'], importance: 2, status: 'ongoing' }];
   if (ch === 18) d.foreshadow_update = [{ title: '神秘玉简', status: 'resolved' }];
   if (ch === 7) d.plot.explored_map_add = ['乱葬岗'];
   if (ch === 24) d.plane_change = '灵界'; // 合成的位面机制测试点
@@ -97,7 +102,7 @@ globalThis.fetch = async (_url, init) => {
   const ch = chMatch(sys + usr);
   let content;
   if (sys.includes('剧情连贯性助手')) { calls.extract++; content = JSON.stringify({ focus: `第${ch}章焦点`, must_use_entities: ['陆长安', '柳青蝉', '暗巷'], continuity_risks: [], due_foreshadow: [] }); }
-  else if (sys.includes('生成一份单章细纲')) { calls.outline++; content = JSON.stringify({ title: `暗巷杀机${ch}`, goal: '推进主线', beats: ['踩点', '伏击', '收割'], characters: ['陆长安'], location: '坊市暗巷', conflicts: '黑吃黑', protagonist_cards: ['毒粉', '四象困煞阵'], foreshadow_plant: [], foreshadow_resolve: [], power_notes: '同阶险胜', hook: '有人在暗处盯着他' }); }
+  else if (sys.includes('生成一份单章细纲')) { calls.outline++; content = JSON.stringify({ title: `暗巷杀机${ch}`, goal: '推进主线', beats: ['踩点', '伏击', '收割'], characters: ['陆长安'], location: '坊市暗巷', conflicts: '黑吃黑', protagonist_cards: ['毒粉', '四象困煞阵'], foreshadow_plant: [], foreshadow_resolve: [], power_notes: '同阶险胜', hook: '有人在暗处盯着他', subplot: '与柳青蝉的暗中交易推进一步', breakthrough_due: ch === 26, battle_scale: 'skirmish', battle_stages: [] }); }
   else if (sys.includes('严格的设定校验官')) { calls.review++; content = JSON.stringify({ approved: true, issues: [], revised_outline: {} }); }
   else if (sys.includes('根据细纲撰写')) { calls.draft++; content = makeDraft(ch); }
   else if (sys.includes('老编辑') || sys.includes('润色')) { calls.polish++; content = makeDraft(ch).replace(/空气仿佛凝固，不知过了多久，他嘴角勾起一抹弧度。\n\n/, ''); }
@@ -128,8 +133,9 @@ async function main() {
   await env.DB.prepare(
     `INSERT INTO books (id,title,status,master_outline,volume_outline,core_settings,power_system,planes,current_plane,style_prompt_override,next_chapter,target_chapters,total_chars,cursor_volume,created_at,updated_at)
      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,0,?,?)`
-  ).bind(bookId, book.title, 'running', book.master_outline, book.volume_outline, book.core_settings,
-    book.power_system, book.planes, book.current_plane, book.style_prompt_override, 1, 1850, t, t).run();
+  ).bind(bookId, book.title, 'running', ...[book.master_outline, book.volume_outline, book.core_settings,
+    book.power_system, book.planes].map((v) => (typeof v === 'string' || v == null) ? v : JSON.stringify(v)),
+    book.current_plane, book.style_prompt_override, 1, 1850, t, t).run();
   for (const c of book.characters) await memory.upsertCharacter(env, bookId, c);
 
   console.log(`\n${C.y}== 用真实《玄天鼎尊》大纲建书，mock LLM 连跑 26 章 ==${C.x}`);
@@ -171,6 +177,20 @@ async function main() {
   const bk = await memory.getBook(env, bookId);
   ok(bk.current_plane === '灵界', '位面随飞升(plane_change)更新', `current_plane=${bk.current_plane}`);
   ok(bk.next_chapter === 27, '进度推进 next_chapter=27', `=${bk.next_chapter}`);
+
+  // 五层记忆：设定卡 / 事件 / 图谱 / 倒排索引
+  const ding = await env.DB.prepare("SELECT * FROM lore WHERE book_id=? AND kind='artifact' AND name='玄元小鼎'").bind(bookId).first();
+  ok(ding && ding.first_ch === 9, '设定卡(神器)落库且记录首见章', `first_ch=${ding ? ding.first_ch : '缺失'}`);
+  const evt = await env.DB.prepare("SELECT * FROM lore WHERE book_id=? AND kind='event'").bind(bookId).first();
+  ok(evt && evt.name === '黑水帮堂主暴毙', '事件系统落库(时间线)', evt ? `第${evt.first_ch}章 ${evt.name}` : '缺失');
+  const edge = await env.DB.prepare("SELECT * FROM graph_edges WHERE book_id=? AND src='陆长安' AND dst='黑水帮'").bind(bookId).first();
+  ok(edge && edge.rel === '仇敌', '知识图谱关系边落库', edge ? `${edge.src}-[${edge.rel}]->${edge.dst}` : '缺失');
+  const tagIdx = await env.DB.prepare("SELECT COUNT(*) c FROM chapter_tags WHERE book_id=? AND tag='玄元小鼎'").bind(bookId).first();
+  ok(tagIdx.c >= 20, '章节标签倒排索引已建立', `玄元小鼎 命中 ${tagIdx.c} 章`);
+  const rag = await memory.retrieveRelevant(env, bookId, ['黑吃黑'], 3);
+  ok(rag.length === 3 && rag.every((r) => r.summary.includes('黑吃黑')), 'RAG 按标签精准召回历史章节', rag.map((r) => `第${r.chapter_no}章`).join('、'));
+  const loreHits = await memory.relevantLore(env, bookId, ['玄元小鼎', '黑水帮'], 12);
+  ok(loreHits.some((l) => l.name === '玄元小鼎') && loreHits.some((l) => l.kind === 'event'), '设定卡按实体检索召回(含标签模糊命中)', loreHits.map((l) => l.name).join('、'));
 
   // 篇幅与排版
   const ch5 = await env.DB.prepare('SELECT content,word_count FROM chapters WHERE book_id=? AND chapter_no=5').bind(bookId).first();
