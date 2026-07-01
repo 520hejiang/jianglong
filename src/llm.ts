@@ -27,10 +27,10 @@ export async function chat(
     model: c.model,
     messages,
     temperature: opts.temperature ?? 0.8,
-    max_tokens: opts.maxTokens ?? 4096,
+    max_tokens: opts.maxTokens ?? 9192,
     stream: false,
   };
-  if (opts.json) body.response_format = { type: "json_object" };
+  #if (opts.json) body.response_format = { type: "json_object" };
 
   let lastErr: unknown;
   for (let attempt = 0; attempt < 3; attempt++) {
