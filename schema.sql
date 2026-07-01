@@ -1,11 +1,15 @@
 -- ============================================================================
--- D1 数据库结构：全自动修仙小说生成系统
+-- D1 数据库结构：全自动修仙小说生成系统（优化版）
 -- 设计原则：
 --   1. 结构化战力体系（境界/功法/法宝做成可被代码校验的字段），防数值膨胀。
 --   2. 伏笔有完整生命周期状态机，防忘填坑。
 --   3. 章节带 summary + tags，用 tag 匹配实现"记忆检索"，无需付费 Vectorize。
 --   4. 一切可手动修改（控制台直接改 D1），用于人工防崩。
+--   5. 增加必要索引，优化查询性能。
 -- ============================================================================
+
+-- 启用外键支持（建议在连接时设置 PRAGMA foreign_keys = ON）
+-- 注意：D1 默认可能不启用，但可执行。本脚本不包含外键约束，但保留了兼容性。
 
 -- ---------- 书 ----------
 CREATE TABLE IF NOT EXISTS books (
@@ -18,7 +22,7 @@ CREATE TABLE IF NOT EXISTS books (
   core_settings  TEXT,                         -- 核心设定集（世界观/势力/地理/历法等，长文本）
   power_system   TEXT,                         -- 境界体系定义（JSON，见 power_ranks 说明）
   planes         TEXT,                         -- 位面定义（JSON：[{name,min_realm,max_realm}]），用于位面-境界一致性校验
-  current_plane  TEXT,                          -- 当前所处位面名（随飞升剧情推进，校验器据此判断越界）
+  current_plane  TEXT,                         -- 当前所处位面名（随飞升剧情推进，校验器据此判断越界）
   style_prompt_override TEXT,                  -- 可选：覆盖默认文风 system prompt
   -- 进度
   next_chapter   INTEGER NOT NULL DEFAULT 1,   -- 下一个要生成的章号
@@ -30,6 +34,10 @@ CREATE TABLE IF NOT EXISTS books (
   created_at     INTEGER NOT NULL,
   updated_at     INTEGER NOT NULL
 );
+
+-- 索引：快速查询运行中的书籍，及按状态排序
+CREATE INDEX IF NOT EXISTS idx_books_status ON books(status);
+CREATE INDEX IF NOT EXISTS idx_books_next ON books(next_chapter);
 
 -- volume_outline JSON 示例：
 -- [
@@ -56,7 +64,9 @@ CREATE TABLE IF NOT EXISTS chapters (
   created_at  INTEGER NOT NULL,
   UNIQUE(book_id, chapter_no, version)
 );
+-- 索引：按书和章节号查询，以及按状态过滤已完成章节
 CREATE INDEX IF NOT EXISTS idx_chapters_book ON chapters(book_id, chapter_no);
+CREATE INDEX IF NOT EXISTS idx_chapters_status ON chapters(book_id, status);
 
 -- ---------- 角色状态（结构化，防战力崩坏） ----------
 CREATE TABLE IF NOT EXISTS characters (
@@ -81,7 +91,10 @@ CREATE TABLE IF NOT EXISTS characters (
   updated_at  INTEGER NOT NULL,
   UNIQUE(book_id, name)
 );
+-- 索引：按书查询所有角色，以及按角色类型/存活状态筛选
 CREATE INDEX IF NOT EXISTS idx_char_book ON characters(book_id);
+CREATE INDEX IF NOT EXISTS idx_char_role ON characters(role);
+CREATE INDEX IF NOT EXISTS idx_char_alive ON characters(alive);
 
 -- ---------- 剧情状态（全局单行/少行，按 key 存） ----------
 CREATE TABLE IF NOT EXISTS plot_state (
@@ -91,6 +104,7 @@ CREATE TABLE IF NOT EXISTS plot_state (
   updated_at  INTEGER NOT NULL,
   PRIMARY KEY (book_id, key)
 );
+-- 注意：plot_state 本身按主键查询，无需额外索引
 
 -- ---------- 伏笔（带生命周期状态机，防忘填坑） ----------
 CREATE TABLE IF NOT EXISTS foreshadowing (
@@ -105,7 +119,9 @@ CREATE TABLE IF NOT EXISTS foreshadowing (
   importance  INTEGER DEFAULT 2,               -- 1 低 2 中 3 主线级
   updated_at  INTEGER NOT NULL
 );
+-- 索引：按书和状态查询活跃伏笔，以及按重要性排序
 CREATE INDEX IF NOT EXISTS idx_fore_book ON foreshadowing(book_id, status);
+CREATE INDEX IF NOT EXISTS idx_fore_importance ON foreshadowing(importance);
 
 -- ---------- 运行日志 ----------
 CREATE TABLE IF NOT EXISTS logs (
@@ -118,7 +134,9 @@ CREATE TABLE IF NOT EXISTS logs (
   meta        TEXT,                            -- JSON（如 token 用量、耗时）
   created_at  INTEGER NOT NULL
 );
+-- 索引：按书和时间检索日志，以及按级别筛选
 CREATE INDEX IF NOT EXISTS idx_logs_book ON logs(book_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
 
 -- ---------- 可编辑的全局 / 单书 Prompt 模板 ----------
 CREATE TABLE IF NOT EXISTS prompts (
@@ -129,3 +147,5 @@ CREATE TABLE IF NOT EXISTS prompts (
   template    TEXT NOT NULL,
   updated_at  INTEGER NOT NULL
 );
+-- 索引：加速按 scope 和 book_id 查找模板
+CREATE INDEX IF NOT EXISTS idx_prompts_scope ON prompts(scope, book_id);

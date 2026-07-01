@@ -100,7 +100,7 @@ globalThis.fetch = async (_url, init) => {
   else if (sys.includes('生成一份单章细纲')) { calls.outline++; content = JSON.stringify({ title: `暗巷杀机${ch}`, goal: '推进主线', beats: ['踩点', '伏击', '收割'], characters: ['陆长安'], location: '坊市暗巷', conflicts: '黑吃黑', protagonist_cards: ['毒粉', '四象困煞阵'], foreshadow_plant: [], foreshadow_resolve: [], power_notes: '同阶险胜', hook: '有人在暗处盯着他' }); }
   else if (sys.includes('严格的设定校验官')) { calls.review++; content = JSON.stringify({ approved: true, issues: [], revised_outline: {} }); }
   else if (sys.includes('根据细纲撰写')) { calls.draft++; content = makeDraft(ch); }
-  else if (sys.includes('润色与自洽修订')) { calls.polish++; content = makeDraft(ch).replace(/空气仿佛凝固，不知过了多久，他嘴角勾起一抹弧度。\n\n/, ''); }
+  else if (sys.includes('老编辑') || sys.includes('润色')) { calls.polish++; content = makeDraft(ch).replace(/空气仿佛凝固，不知过了多久，他嘴角勾起一抹弧度。\n\n/, ''); }
   else if (sys.includes('抽取本章发生的状态变化')) { calls.update++; content = makeDelta(ch); }
   else content = '{}';
   return new Response(JSON.stringify({ choices: [{ message: { content } }], usage: { prompt_tokens: 50, completion_tokens: 50, total_tokens: 100 } }), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -216,16 +216,17 @@ async function main() {
   const genjob = await env.DB.prepare("SELECT value FROM plot_state WHERE book_id=? AND key='__genjob'").bind(bookId).first();
   ok(!genjob || genjob.value === 'null' || genjob.value === null, '完成后生成存档已清空(不会卡住下一章)');
 
-  // ---- Part D: 重写(startRewrite)——只换正文出新版本, 不重复应用状态(灵石不变) ----
-  console.log(`\n${C.y}== 重写测试（断点续传式重写第5章, 不应重复改状态）==${C.x}`);
+  // ---- Part D: 重写——就地覆盖(不新增重复行), 不重复应用状态(灵石不变) ----
+  console.log(`\n${C.y}== 重写测试（断点续传式重写第5章, 覆盖不新增、不改状态）==${C.x}`);
   const heroBefore = (await memory.loadCharacters(env, bookId)).find(c => c.role === 'protagonist');
   const stonesBefore = heroBefore.assets.spirit_stones;
-  const v = await pipeline.startRewrite(env, bookId, 5);
+  const rowsBefore = (await env.DB.prepare("SELECT COUNT(*) c FROM chapters WHERE book_id=? AND chapter_no=5").bind(bookId).first()).c;
+  await pipeline.startRewrite(env, bookId, 5);
   let rwStatus = 'progress', rwSteps = 0;
   while (rwStatus !== 'completed' && rwSteps < 20) { rwStatus = await pipeline.advanceBook(env, bookId, 1); rwSteps++; }
-  const maxV = (await env.DB.prepare("SELECT MAX(version) v FROM chapters WHERE book_id=? AND chapter_no=5").bind(bookId).first()).v;
+  const rowsAfter = (await env.DB.prepare("SELECT COUNT(*) c FROM chapters WHERE book_id=? AND chapter_no=5").bind(bookId).first()).c;
   const heroAfter = (await memory.loadCharacters(env, bookId)).find(c => c.role === 'protagonist');
-  ok(rwStatus === 'completed' && v === 2 && maxV === 2, '重写产出新版本(v2), 断点续传完成', `version=${v}, maxV=${maxV}`);
+  ok(rwStatus === 'completed' && rowsAfter === 1 && rowsAfter === rowsBefore, '重写就地覆盖, 不产生重复章行', `第5章行数 ${rowsBefore}→${rowsAfter}`);
   ok(heroAfter.assets.spirit_stones === stonesBefore, '重写未重复应用状态(灵石不变)', `灵石 ${stonesBefore}→${heroAfter.assets.spirit_stones}`);
   const rwjob = await env.DB.prepare("SELECT value FROM plot_state WHERE book_id=? AND key='__rewritejob'").bind(bookId).first();
   ok(!rwjob || rwjob.value === 'null' || rwjob.value === null, '重写存档完成后已清空');

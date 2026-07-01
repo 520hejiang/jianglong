@@ -27,16 +27,16 @@ export async function chat(
     model: c.model,
     messages,
     temperature: opts.temperature ?? 0.8,
-    max_tokens: opts.maxTokens ?? 4096,
+    max_tokens: opts.maxTokens ?? 9192,
     stream: false,
   };
-  if (opts.json) body.response_format = { type: "json_object" };
+// if (opts.json) body.response_format = { type: "json_object" };
 
   let lastErr: unknown;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 120_000); // 单次最长 120s
+      const timer = setTimeout(() => ctrl.abort(), 999_000); // 单次最长 999s
       const res = await fetch(`${c.baseUrl}/chat/completions`, {
         method: "POST",
         headers: {
@@ -54,11 +54,38 @@ export async function chat(
         continue;
       }
       if (!res.ok) {
-        throw new Error(`LLM ${res.status}: ${await safeText(res)}`);
-      }
-      const data: any = await res.json();
-      const text: string = data?.choices?.[0]?.message?.content ?? "";
-      return { text, usage: data?.usage };
+  throw new Error(`LLM ${res.status}: ${await safeText(res)}`);
+}
+
+// ★★★ 核心升级：先读纯文本，防止空内容直接崩掉 ★★★
+const rawText = await res.text();
+
+// 如果返回的是完全空的字符串
+if (!rawText || rawText.trim() === "") {
+  throw new Error(`API 返回了空内容 (状态码: ${res.status})。可能是 Cloudflare 超时、Token 失效或请求被拦截。`);
+}
+
+let data: any;
+try {
+  data = JSON.parse(rawText);
+} catch (e) {
+  // ★★★ 杀手锏：把 API 返回的真实内容截取一段，直接塞进报错信息里 ★★★
+  const snippet = rawText.length > 300 ? rawText.substring(0, 300) + "..." : rawText;
+  throw new Error(`响应不是有效的 JSON。API 返回的原始内容: ${snippet}`);
+}
+// --- 插入这段诊断逻辑 ---
+    if (data?.error) {
+      throw new Error(`🚨 API 隐性错误: ${JSON.stringify(data.error)}`);
+    }
+    if (data?.result?.response) {
+      return { text: data.result.response, usage: data?.result?.usage };
+    }
+    if (!data?.choices?.[0]?.message) {
+      throw new Error(`🚨 接口回包格式异常，找不到 choices！真实回包是: ${rawText}`);
+    }
+    // --- 插入结束 ---
+const text: string = data?.choices?.[0]?.message?.content ?? "";
+return { text, usage: data?.usage };
     } catch (e) {
       lastErr = e;
       await sleep(1000 * Math.pow(2, attempt));
@@ -69,6 +96,11 @@ export async function chat(
 
 // 要求模型返回 JSON 时的稳健解析（容忍 ```json 包裹、前后噪声、尾逗号、智能引号等常见瑕疵）
 export function parseJson<T>(raw: string): T {
+  // 🚨 第一步就判空，防止 API 返回空白导致直接崩溃
+  if (!raw || raw.trim() === "") {
+    throw new Error(`[parseJson 判空] API 返回的内容是空白的 (长度: ${raw.length})，无法解析。可能是 OpenCode 额度用尽或回包出错。`);
+  }
+
   let s = raw.trim();
   const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fence) s = fence[1].trim();
