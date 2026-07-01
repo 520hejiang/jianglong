@@ -39,8 +39,8 @@ id = "aec17942ebb2417fb77cf0d8e3effc3a"
 
 # --- 普通变量（非机密）。机密用 `wrangler secret put` 注入 ---
 [vars]
-DEEPSEEK_MODEL = "@cf/zai-org/glm-4.7-flash"
-DEEPSEEK_BASE_URL = "https://api.cloudflare.com/client/v4/accounts/21c3fd33aecb93bfabec06c2788df08a/ai/v1"
+DEEPSEEK_MODEL = "MiMo-V2.5"
+DEEPSEEK_BASE_URL = "https://opencode.ai/zen/go/v1"
 TARGET_CHARS_MIN = "1200"
 TARGET_CHARS_MAX = "1700"
 MAX_CONTEXT_TOKENS = "60000"   # 按官方最大上下文留余量，可在 dashboard 调整
