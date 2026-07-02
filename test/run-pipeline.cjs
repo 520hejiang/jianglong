@@ -38,7 +38,7 @@ class KV {
 }
 
 // ---------------- mock DeepSeek：按 system prompt 判定阶段，返回假数据 ----------------
-const calls = { extract: 0, outline: 0, review: 0, draft: 0, polish: 0, update: 0 };
+const calls = { extract: 0, outline: 0, review: 0, draft: 0, polish: 0, editor: 0, update: 0 };
 
 function spiritDelta(ch) {
   if (ch % 5 === 0) return 30;       // 缴获
@@ -108,6 +108,7 @@ globalThis.fetch = async (_url, init) => {
   else if (sys.includes('生成一份单章细纲')) { calls.outline++; content = JSON.stringify({ title: `暗巷杀机${ch}`, goal: '推进主线', beats: ['踩点', '伏击', '收割'], characters: ['陆长安'], location: '坊市暗巷', conflicts: '黑吃黑', protagonist_cards: ['毒粉', '四象困煞阵'], foreshadow_plant: [], foreshadow_resolve: [], power_notes: '同阶险胜', hook: '有人在暗处盯着他', subplot: '与柳青蝉的暗中交易推进一步', breakthrough_due: ch === 26, battle_scale: 'skirmish', battle_stages: [] }); }
   else if (sys.includes('严格的设定校验官')) { calls.review++; content = JSON.stringify({ approved: true, issues: [], revised_outline: {} }); }
   else if (sys.includes('根据细纲撰写')) { calls.draft++; content = makeDraft(ch); }
+  else if (sys.includes('终审')) { calls.editor++; content = JSON.stringify({ score: 86, verdict: 'pass', fatal_issues: [], advice: ['结尾钩子可以更狠一点'] }); }
   else if (sys.includes('老编辑') || sys.includes('润色')) { calls.polish++; content = makeDraft(ch).replace(/空气仿佛凝固，不知过了多久，他嘴角勾起一抹弧度。\n\n/, ''); }
   else if (sys.includes('抽取本章发生的状态变化')) { calls.update++; content = makeDelta(ch); }
   else content = '{}';
@@ -240,6 +241,12 @@ async function main() {
   const expPolish = Math.floor(N / 8); // 8,16,24
   ok(calls.polish <= expPolish + 1, `auto 润色按需触发省钱`, `draft ${calls.draft} 次 / polish 仅 ${calls.polish} 次(省 ${calls.draft - calls.polish} 次)`);
 
+  // AI 主编终审：每章都过审，评分随质检报告归档
+  ok(calls.editor >= N, 'AI 主编终审每章执行', `editor 调用 ${calls.editor} 次`);
+  const qcRow = await env.DB.prepare("SELECT qc_report FROM chapters WHERE book_id=? AND chapter_no=10").bind(bookId).first();
+  const qcObj = JSON.parse(qcRow.qc_report);
+  ok(qcObj.editor_score === 86, '主编评分写入质检报告', `score=${qcObj.editor_score}`);
+
   // LENGTH 是 warn 级，且 mock 正文刻意偏短(真实 LLM 写满 2500-3000 不会触发)，故剔除后再断言"无其它误报"
   const realIssues = allIssues.map(s => s.replace(/\[warn\] LENGTH:[^;]*?字，短于目标下限 \d+/g, '').replace(/第\d+章:\s*\|?\s*/g, '').trim()).filter(Boolean);
   ok(realIssues.length === 0, '正常推进无误报(LENGTH warn 因 mock 正文偏短属预期, 已剔除)', realIssues.join(' ;; '));
@@ -300,6 +307,12 @@ async function main() {
   const dupRows = await env.DB.prepare("SELECT COUNT(*) c FROM chapters WHERE book_id=? AND chapter_no=3 AND version=1").bind(bookId).first();
   const dupContent = await env.DB.prepare("SELECT title FROM chapters WHERE book_id=? AND chapter_no=3 AND version=1").bind(bookId).first();
   ok(dupRows.c === 1 && dupContent.title === '重存测试', '章节重复保存幂等覆盖(UNIQUE死循环修复)', `行数${dupRows.c}`);
+
+  // 文本字段消毒：模型把 goals 写成数组也不再抛 D1_TYPE_ERROR，自动压成文本
+  await memory.upsertCharacter(env, bookId, { name: '陆长安', goals: ['沿暗河探索', '查明骨坠符号', '活着离开万骨坑'] });
+  const heroT = (await memory.loadCharacters(env, bookId)).find(c => c.role === 'protagonist');
+  ok(typeof heroT.goals === 'string' && heroT.goals.includes('；') && heroT.goals.includes('活着离开万骨坑'),
+    '数组型文本字段自动消毒入库(D1_TYPE_ERROR修复)', heroT.goals);
 
   // ---- 抽样打印一章正文，肉眼看效果 ----
   console.log(`\n${C.y}== 抽样：第 5 章正文前 400 字（看文风/排版/有无AI味）==${C.x}`);

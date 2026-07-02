@@ -14,6 +14,9 @@ export interface Env {
   MAX_CONTEXT_TOKENS: string;
   MIN_BREAKTHROUGH_GAP?: string;
   POLISH_MODE?: string; // always | auto | off，默认 auto（仅在检出AI味/超限/重写时润色，省钱）
+  EDITOR_MODE?: string;  // on | off，默认 on：每章过一遍 AI 主编终审（评分+硬伤扫描，不合格打回重写）
+  QUALITY_BAR?: string;  // 主编评分及格线，默认 75，低于此分打回重写
+  MAX_REWRITE?: string;  // 单章最多回炉次数（质检+主编共享额度），默认 3
   // secrets
   DEEPSEEK_API_KEY: string;
   TELEGRAM_BOT_TOKEN?: string;

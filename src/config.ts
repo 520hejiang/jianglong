@@ -9,8 +9,13 @@ export const cfg = (env: Env) => ({
   charsMin: parseInt(env.TARGET_CHARS_MIN || "2000", 10),
   charsMax: parseInt(env.TARGET_CHARS_MAX || "2400", 10),
   maxContextTokens: parseInt(env.MAX_CONTEXT_TOKENS || "60000", 10),
-  maxRewrite: 2,        // 正文质检不过最多重写次数
+  maxRewrite: parseInt(env.MAX_REWRITE || "3", 10),  // 单章最多回炉次数（代码质检+AI主编共享额度）
   maxReviewLoop: 2,     // 细纲审核最多打回次数
+
+  // AI 主编终审：每章定稿后过一遍主编（评分+硬伤扫描），不合格打回重写。
+  // 追求极致质量时开启（默认 on）；qualityBar 为及格线。
+  editorMode: (env.EDITOR_MODE || "on") as "on" | "off",
+  qualityBar: parseInt(env.QUALITY_BAR || "75", 10),
   
   // 【核心修改】：主角"大境界"突破的最小章节间隔基数。
   // 防突破节奏过快。后期此值会在管线（pipeline/validators）校验中进行指数级放大：

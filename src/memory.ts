@@ -13,6 +13,14 @@ import { emptyAssets } from "./types";
 const now = () => Date.now();
 const uid = () => crypto.randomUUID();
 
+// 模型偶尔把字符串字段写成数组/对象（如 goals 给了三条目标的数组），
+// D1 绑定对象直接抛 D1_TYPE_ERROR 卡死生成。所有文本字段入库前统一压成文本。
+const T = (v: unknown): string =>
+  v == null ? ""
+  : Array.isArray(v) ? v.map((x) => T(x)).filter(Boolean).join("；")
+  : typeof v === "object" ? JSON.stringify(v)
+  : String(v);
+
 // ---------------- Book ----------------
 export async function getBook(env: Env, id: string): Promise<Book | null> {
   return env.DB.prepare("SELECT * FROM books WHERE id=?").bind(id).first<Book>();
@@ -74,10 +82,10 @@ export async function upsertCharacter(env: Env, bookId: string, c: Partial<Chara
        last_seen_ch=?, last_breakthrough_ch=?, updated_at=?
        WHERE book_id=? AND name=?`
     ).bind(
-      J(merged.aliases), merged.role, merged.alive ? 1 : 0, merged.realm_index, merged.realm_name,
+      J(merged.aliases), merged.role, merged.alive ? 1 : 0, merged.realm_index, T(merged.realm_name),
       merged.realm_sub, J(merged.techniques), J(merged.movement_arts), J(merged.artifacts),
-      J(merged.assets), J(merged.relations), merged.status_notes,
-      merged.personality_traits ?? "", merged.speech_pattern ?? "", merged.secrets ?? "", merged.goals ?? "",
+      J(merged.assets), J(merged.relations), T(merged.status_notes),
+      T(merged.personality_traits), T(merged.speech_pattern), T(merged.secrets), T(merged.goals),
       merged.last_seen_ch, merged.last_breakthrough_ch, now(), bookId, c.name
     ).run();
   } else {
@@ -88,10 +96,10 @@ export async function upsertCharacter(env: Env, bookId: string, c: Partial<Chara
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
     ).bind(
       uid(), bookId, c.name, J(c.aliases ?? []), c.role ?? "npc", c.alive === false ? 0 : 1,
-      c.realm_index ?? 0, c.realm_name ?? "", c.realm_sub ?? 0, J(c.techniques ?? []),
+      c.realm_index ?? 0, T(c.realm_name), c.realm_sub ?? 0, J(c.techniques ?? []),
       J(c.movement_arts ?? []), J(c.artifacts ?? []), J(c.assets ?? emptyAssets()),
-      J(c.relations ?? []), c.status_notes ?? "",
-      c.personality_traits ?? "", c.speech_pattern ?? "", c.secrets ?? "", c.goals ?? "",
+      J(c.relations ?? []), T(c.status_notes),
+      T(c.personality_traits), T(c.speech_pattern), T(c.secrets), T(c.goals),
       c.last_seen_ch ?? 0, c.last_breakthrough_ch ?? 0, now()
     ).run();
   }
@@ -110,14 +118,14 @@ export async function upsertLore(env: Env, bookId: string, e: {
     const tags = Array.from(new Set([...safeArr(existing.tags), ...(e.tags || [])]));
     await env.DB.prepare(
       "UPDATE lore SET detail=?, tags=?, last_ch=?, importance=?, status=?, updated_at=? WHERE id=?"
-    ).bind(e.detail, J(tags), ch, Math.max(existing.importance ?? 2, e.importance ?? 2),
-      e.status ?? "", now(), existing.id).run();
+    ).bind(T(e.detail), J(tags), ch, Math.max(existing.importance ?? 2, e.importance ?? 2),
+      T(e.status), now(), existing.id).run();
   } else {
     await env.DB.prepare(
       `INSERT INTO lore (id,book_id,kind,name,detail,tags,first_ch,last_ch,importance,status,updated_at)
        VALUES (?,?,?,?,?,?,?,?,?,?,?)`
-    ).bind(uid(), bookId, e.kind, e.name, e.detail, J(e.tags ?? []), ch, ch,
-      e.importance ?? 2, e.status ?? "", now()).run();
+    ).bind(uid(), bookId, e.kind, T(e.name), T(e.detail), J(e.tags ?? []), ch, ch,
+      e.importance ?? 2, T(e.status), now()).run();
   }
 }
 
@@ -157,7 +165,7 @@ export async function upsertEdges(env: Env, bookId: string, edges: { src: string
     await env.DB.prepare(
       `INSERT INTO graph_edges (book_id,src,dst,rel,note,updated_ch,updated_at) VALUES (?,?,?,?,?,?,?)
        ON CONFLICT(book_id,src,dst,rel) DO UPDATE SET note=excluded.note, updated_ch=excluded.updated_ch, updated_at=excluded.updated_at`
-    ).bind(bookId, e.src, e.dst, e.rel, e.note ?? "", ch, now()).run();
+    ).bind(bookId, T(e.src), T(e.dst), T(e.rel), T(e.note), ch, now()).run();
   }
 }
 
@@ -203,7 +211,7 @@ export async function addForeshadow(env: Env, bookId: string, f: { title: string
   await env.DB.prepare(
     `INSERT INTO foreshadowing (id,book_id,title,detail,status,planted_ch,due_ch,importance,updated_at)
      VALUES (?,?,?,?,'planted',?,?,?,?)`
-  ).bind(uid(), bookId, f.title, f.detail, f.planted_ch, due, f.importance, now()).run();
+  ).bind(uid(), bookId, T(f.title), T(f.detail), f.planted_ch, due, f.importance, now()).run();
 }
 
 export async function updateForeshadowByTitle(env: Env, bookId: string, title: string, status: string, ch: number) {
@@ -314,8 +322,8 @@ export async function saveChapter(env: Env, bookId: string, ch: {
        summary=excluded.summary, ending_tail=excluded.ending_tail, tags=excluded.tags,
        word_count=excluded.word_count, status='done', qc_report=excluded.qc_report`
   ).bind(
-    uid(), bookId, ch.chapter_no, ch.title, ch.outline, ch.content, ch.summary,
-    ch.ending_tail, J(ch.tags), ch.word_count, ch.version, ch.qc_report, now()
+    uid(), bookId, ch.chapter_no, T(ch.title), ch.outline, ch.content, T(ch.summary),
+    T(ch.ending_tail), J(ch.tags), ch.word_count, ch.version, ch.qc_report, now()
   ).run();
   await indexChapterTags(env, bookId, ch.chapter_no, ch.tags);
 }

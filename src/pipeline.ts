@@ -8,7 +8,7 @@ import { chat, parseJson, chatJSON } from "./llm";
 import * as M from "./memory";
 import { validateDelta, hasBlocking, formatIssues, detectSlop, detectLedgerLeaks, detectRealmMisnaming } from "./validators";
 import {
-  PROMPT_EXTRACT, PROMPT_OUTLINE, PROMPT_REVIEW, PROMPT_DRAFT, PROMPT_POLISH, PROMPT_UPDATE, PROMPT_DIGEST,
+  PROMPT_EXTRACT, PROMPT_OUTLINE, PROMPT_REVIEW, PROMPT_DRAFT, PROMPT_POLISH, PROMPT_EDITOR, PROMPT_UPDATE, PROMPT_DIGEST,
 } from "./prompts";
 import { tg } from "./telegram";
 
@@ -38,7 +38,7 @@ export interface ChapterResult {
 }
 
 // 生成阶段（断点续传：每完成一步存档，被掐断也能从断点继续）
-type Stage = "extract" | "outline" | "review" | "draft" | "polish" | "update" | "finalize" | "rewrite" | "complete";
+type Stage = "extract" | "outline" | "review" | "draft" | "polish" | "editor" | "update" | "finalize" | "rewrite" | "complete";
 
 export interface GenState {
   chapterNo: number;
@@ -58,6 +58,8 @@ export interface GenState {
   wc?: number;
   isRewrite?: boolean;
   startedAt?: number;
+  editorScore?: number;   // AI 主编终审评分
+  editorNotes?: string[]; // 主编意见（存入质检报告）
 }
 
 const GENJOB_KEY = "__genjob";
@@ -172,7 +174,33 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
           await M.log(env, { bookId, chapterNo: ch, level: "warn", stage: "polish", message: "润色后仍报灵石总余额，已代码兜底改写为模糊表述" });
         }
       }
-      return { ...st, stage: "update", finalText };
+      return { ...st, stage: "editor", finalText };
+    }
+    // AI 主编终审：评分+硬伤扫描。硬伤或低于及格线→带着主编意见回炉重写；
+    // 通过→意见与评分随质检报告归档。主编自身故障不阻塞主流程（降级跳过）。
+    case "editor": {
+      if (c.editorMode === "off") return { ...st, stage: "update" };
+      try {
+        const r = await chatJSON<any>(env, [
+          { role: "system", content: stylePrefix + fill(await tpl(env, bookId, "editor", PROMPT_EDITOR), { CH: ch, BAR: c.qualityBar }) },
+          { role: "user", content: fill("【本章定稿】\n{{TEXT}}\n\n【本章细纲】\n{{OUTLINE}}\n\n【当前世界状态（对照查矛盾）】\n{{MEMORY}}",
+              { TEXT: st.finalText!, OUTLINE: st.outlineJson!, MEMORY: st.memory! }) },
+        ], { temperature: 0.2, maxTokens: 1800 });
+        const score = typeof r.score === "number" && Number.isFinite(r.score) ? Math.round(r.score) : 80;
+        const fatal: string[] = Array.isArray(r.fatal_issues) ? r.fatal_issues.map((x: any) => String(x)) : [];
+        const advice: string[] = Array.isArray(r.advice) ? r.advice.map((x: any) => String(x)) : [];
+        await M.log(env, { bookId, chapterNo: ch, stage: "editor", message: `主编评分 ${score}分${fatal.length ? `｜硬伤${fatal.length}条` : ""}`, meta: { score, fatal, advice } });
+        const needRewrite = (fatal.length > 0 || score < c.qualityBar) && !st.isRewrite && st.attempt < c.maxRewrite - 1;
+        if (needRewrite) {
+          const fb = [...fatal.map((x) => `[硬伤] ${x}`), ...advice].slice(0, 8).map((x) => `- ${x}`).join("\n");
+          await M.log(env, { bookId, chapterNo: ch, level: "warn", stage: "editor", message: `主编打回(评分${score})，第${st.attempt + 1}次回炉` });
+          return { ...st, stage: "draft", attempt: st.attempt + 1, memory: st.memory! + `\n\n【主编终审打回意见（本次重写必须逐条执行）】\n${fb}` };
+        }
+        return { ...st, stage: "update", editorScore: score, editorNotes: [...fatal, ...advice].slice(0, 6) };
+      } catch (e) {
+        await M.log(env, { bookId, chapterNo: ch, level: "warn", stage: "editor", message: `主编审稿失败已跳过: ${String(e).slice(0, 150)}` });
+        return { ...st, stage: "update" };
+      }
     }
     case "update": {
       const delta = await extractDelta(env, bookId, ch, st.finalText!, st.memory!, stylePrefix);
@@ -273,7 +301,7 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
       await M.saveChapter(env, bookId, {
         chapter_no: ch, title, outline: JSON.stringify(outline), content: cleaned,
         summary: delta.summary || "", ending_tail: body.slice(-320), tags: delta.tags || [],
-        word_count: wc, version: st.version, qc_report: JSON.stringify({ issues: issuesText }),
+        word_count: wc, version: st.version, qc_report: JSON.stringify({ issues: issuesText, editor_score: st.editorScore ?? null, editor_notes: st.editorNotes ?? [] }),
       });
 
       if (st.isRewrite) {
@@ -326,6 +354,15 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
         if (ratio >= 0.8) directives.push("节奏：近10章战斗占比过高，读者会疲劳。本章放缓——写谋划、人情、经营或修炼沉淀，不要再开打。");
         else if (ratio <= 0.1) directives.push("节奏：近10章几乎无冲突，张力散了。本章须引入一次真实威胁、对抗或危机。");
       }
+      // 主编评分趋势（移植 main_engine2 的质量监控）：连续走低→给下一章下打磨指令
+      if (typeof st.editorScore === "number") {
+        health.scores = [...(health.scores || []), st.editorScore].slice(-30);
+        const last5: number[] = health.scores.slice(-5);
+        if (last5.length === 5) {
+          const avg = last5.reduce((a: number, b: number) => a + b, 0) / 5;
+          if (avg < 70) directives.push(`质量：最近5章主编平均分仅 ${Math.round(avg)}，质量在滑坡。本章放慢节奏，把冲突、对话、感官细节写扎实，宁可少推进也不写水。`);
+        }
+      }
       const realmKey = hero ? `${hero.realm_name}·${hero.realm_sub}` : "";
       if (realmKey && realmKey === health.realm) {
         const stall = ch - (health.realm_since ?? ch);
@@ -345,7 +382,8 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
 
       const rewrites = st.attempt || 0;
       const qc = issuesText.length ? `\n质检: ${issuesText.join("；").slice(0, 300)}` : "";
-      await tg(env, `📖 <b>${book.title}</b> 第${ch}章 ${title}（${wc}字｜重写${rewrites}次）\n摘要: ${delta.summary || "—"}\n主角: ${heroLine}\n${settlement}${qc}`);
+      const scoreLine = typeof st.editorScore === "number" ? `｜主编评分 ${st.editorScore}` : "";
+      await tg(env, `📖 <b>${book.title}</b> 第${ch}章 ${title}（${wc}字｜重写${rewrites}次${scoreLine}）\n摘要: ${delta.summary || "—"}\n主角: ${heroLine}\n${settlement}${qc}`);
 
       return { ...st, stage: "complete", title, wc, issues: issuesText };
     }
