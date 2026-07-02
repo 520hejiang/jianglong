@@ -181,15 +181,17 @@ export function validateDelta(
     }
   }
 
-  // --- 规则10：伏笔超期未回收 ---
-  for (const f of fores) {
-    if (f.status !== "resolved" && f.due_ch && chapterNo > f.due_ch) {
-      issues.push({
-        level: "warn",
-        rule: "FORESHADOW_OVERDUE",
-        detail: `伏笔「${f.title}」已超过建议回收章(${f.due_ch})，当前第 ${chapterNo} 章仍未了结。`,
-      });
-    }
+  // --- 规则10：伏笔超期未回收（只报最严重的3条，防警告刷屏挤占重写提示） ---
+  const overdueList = fores
+    .filter((f) => f.status !== "resolved" && f.due_ch && chapterNo > f.due_ch)
+    .sort((a, b) => (b.importance - a.importance) || ((chapterNo - (a.due_ch || 0)) - (chapterNo - (b.due_ch || 0))))
+    .slice(0, 3);
+  for (const f of overdueList) {
+    issues.push({
+      level: "warn",
+      rule: "FORESHADOW_OVERDUE",
+      detail: `伏笔「${f.title}」已超过建议回收章(${f.due_ch})，当前第 ${chapterNo} 章仍未了结。`,
+    });
   }
 
   return issues;
@@ -229,16 +231,38 @@ export function detectSlop(text: string): SlopReport {
     const sd = Math.sqrt(paras.reduce((a, b) => a + (b - mean) ** 2, 0) / paras.length);
     if (mean > 0 && sd / mean < 0.25) reasons.push("段落长度过于均匀(疑似AI节奏)");
   }
+
+  // 段首单调（移植自 main_engine2 的 first-word monotony）：过多段落以"他/她/这/那/陆"等起头
+  const lines = text.split(/\n+/).map((p) => p.trim()).filter((p) => p.length > 10);
+  if (lines.length >= 8) {
+    const boring = lines.filter((p) => /^[他她这那]/.test(p)).length;
+    if (boring / lines.length > 0.45) reasons.push(`段首单调(${boring}/${lines.length}段以他/她/这/那起头，超45%)`);
+  }
   return { hit: reasons.length > 0, reasons };
 }
 
 // ---------- 账本泄漏检测（纯代码） ----------
-// 正文里严禁出现"还剩/只剩/共X块灵石"这类总余额表述——总账归系统面板管，
-// AI 报总数必错。检出即触发润色删除（润色模板里有对应指令）。
-const LEDGER_LEAK = /(还剩|只剩|仅剩|尚余|共有|一共|总共|全部家当)[^。！？\n]{0,12}?[\d一二两三四五六七八九十百千]+\s*[块枚颗粒]\s*[下中上极品]{0,2}\s*灵[石晶]/g;
+// 正文里严禁出现总余额表述——总账归系统面板管，AI 报总数必错。
+// 三类泄漏模式：①"还剩/只剩/共X块"；②"怀里/身上/袋中…X块灵石"式盘点；③"所有/全部灵石…X块"。
+// 带交易动词(摸出/掏出/花/付/缴获…)的单笔流水不算泄漏。
+const LEDGER_PATTERNS = [
+  /(还剩|只剩|仅剩|尚余|共有|一共|总共|全部家当)[^。！？\n]{0,12}?[\d一二两三四五六七八九十百千]+\s*[块枚颗粒]\s*[下中上极品]{0,2}\s*灵[石晶]/g,
+  /(怀里|怀中|袋里|袋中|身上|囊中|口袋)[^。！？\n]{0,10}?[\d一二两三四五六七八九十百千]+\s*[块枚颗粒]\s*[下中上极品]{0,2}\s*灵[石晶]/g,
+  /(所有|全部)[^。！？\n]{0,6}灵[石晶][^。！？\n]{0,8}?[\d一二两三四五六七八九十百千]+\s*[块枚颗粒]/g,
+  // 盘点式跨句报数："摸了摸灵石袋。十六块下品灵石" —— 袋后紧跟计数句
+  /灵[石晶]袋[^\n]{0,8}[\d一二两三四五六七八九十百千]+\s*[块枚颗粒]/g,
+  // 清点式收尾："十六块下品灵石，全在/还在/没动"
+  /[\d一二两三四五六七八九十百千]+\s*[块枚颗粒]\s*[下中上极品]{0,2}\s*灵[石晶][^。！？\n]{0,6}(全在|还在|尚在|没动|未动|分文未少)/g,
+];
+const TXN_VERBS = /摸出|掏出|取出|拿出|递|拍在|扔|抛|付|花了|花去|买|换|缴获|得了|收下|塞|数出|甩/;
 
 export function detectLedgerLeaks(text: string): SlopReport {
-  const hits = text.match(LEDGER_LEAK) || [];
+  const hits: string[] = [];
+  for (const re of LEDGER_PATTERNS) {
+    for (const m of text.match(re) || []) {
+      if (!TXN_VERBS.test(m)) hits.push(m);
+    }
+  }
   return {
     hit: hits.length > 0,
     reasons: hits.length ? [`正文报了灵石总余额(违反系统结算铁律): ${hits.slice(0, 3).join("、")}`] : [],

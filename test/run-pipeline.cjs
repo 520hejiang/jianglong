@@ -176,6 +176,21 @@ async function main() {
   ok(leak1.hit === true, '报总余额("只剩三块灵石")被检出', leak1.reasons.join(''));
   ok(leak2.hit === false, '单笔收支表述不误伤');
 
+  // 账本泄漏加宽：盘点式总余额也要抓，交易流水不误伤
+  const leak3 = validators.detectLedgerLeaks('他摸了摸怀里的灵石袋。十六块下品灵石，全在。');
+  const leak4 = validators.detectLedgerLeaks('他卷起怀中所有灵石——十块下品灵石——拍进鼎里。');
+  const leak5 = validators.detectLedgerLeaks('他从怀里摸出三块下品灵石递过去。');
+  ok(leak3.hit === true, '盘点式总余额("怀里…十六块灵石")被检出', leak3.reasons.join(''));
+  ok(leak4.hit === true, '"所有灵石…十块"式总余额被检出', leak4.reasons.join(''));
+  ok(leak5.hit === false, '"怀里摸出三块"交易流水不误伤');
+
+  // 整章去重：标题中段复现 / 长段落复写 均被截断
+  const dd1 = pipeline.dedupeChapter('开头正文。'.repeat(150) + '\n第5章 测试标题\n' + '后半重复内容。'.repeat(100), 5);
+  ok(!dd1.includes('第5章') , '正文中段重复标题被截断', `长度${dd1.length}`);
+  const longPara = '这是一个足够长的段落专门用来做指纹检测字数必须超过六十个字才有效所以这里再补充相当多的内容来凑够长度限制确保通过六十字的段落过滤门槛不出岔子。';
+  const dd2 = pipeline.dedupeChapter('前文铺垫。'.repeat(120) + '\n' + longPara + '\n' + '中间过渡。'.repeat(120) + '\n' + longPara + '\n尾部残余', 6);
+  ok(!dd2.endsWith('尾部残余') && dd2.includes(longPara), '长段落复写从第二次出现处截断', `长度${dd2.length}`);
+
   // 境界叫法检测：层制境界(练气9层)禁"初中后巅峰"，四档制(筑基+)禁"X层"
   const ranks = [{ index: 0, name: '练气', subLayers: 9 }, { index: 1, name: '筑基', subLayers: 4 }];
   const rn1 = validators.detectRealmMisnaming('那老者已是练气后期修为，护卫不过练气三层。', ranks);

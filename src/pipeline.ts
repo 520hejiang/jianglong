@@ -93,9 +93,15 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
       const recentSums = await M.recentSummaries(env, bookId, 10);
       const events = await M.recentEvents(env, bookId, 8);
       const settlement: string = (await M.getPlot(env, bookId, "last_settlement")) || "";
+      // 健康监控指令：上一章体检发现的问题（战斗过密/境界停滞/女主缺席…），注入本章后即清空
+      const directives: string[] = (await M.getPlot(env, bookId, "health_todo")) || [];
+      if (directives.length) {
+        await M.setPlot(env, bookId, "health_todo", null);
+        await M.log(env, { bookId, chapterNo: ch, stage: "extract", message: `注入健康监控指令 ${directives.length} 条`, meta: directives });
+      }
       const baseMem = M.compileMemoryContext({
         chars, fores, mainNode, exploredMap, relevant: [], currentPlane, storyDigest,
-        events, recentSums, powerRanks, settlement,
+        events, recentSums, powerRanks, settlement, directives,
         lastSummary: last?.summary || "", lastTail: last?.ending_tail || "",
       });
       const extractRaw = await chat(env, [
@@ -113,7 +119,7 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
       const edges = await M.edgesFor(env, bookId, entities, 20);
       const memory = M.compileMemoryContext({
         chars, fores, mainNode, exploredMap, relevant, currentPlane, storyDigest,
-        lore, edges, events, recentSums, powerRanks, settlement,
+        lore, edges, events, recentSums, powerRanks, settlement, directives,
         lastSummary: last?.summary || "", lastTail: last?.ending_tail || "",
       });
       const ops = await M.recentOpenings(env, bookId, 5);
@@ -170,6 +176,37 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
     }
     case "update": {
       const delta = await extractDelta(env, bookId, ch, st.finalText!, st.memory!, stylePrefix);
+
+      // 【境界序号权没收】realm_index 由代码按境界名推导，模型报错也无效：
+      // 模型常把"练气一层→二层"误报成大境界+1，触发误拦截。规则：
+      //   - 给了境界名 → 序号=境界体系表里该名的序号（模型给的序号作废）
+      //   - 没给境界名 → 大境界序号一律保持不变（升层只动 realm_sub）
+      //   - breakthrough 标记只在大境界真正提升时才生效
+      const coerced: string[] = [];
+      for (const cu of delta.characters) {
+        const prev = charMap.get(cu.name);
+        if (cu.realm_name) {
+          const rk = powerRanks.find((r) => r.name === cu.realm_name)
+            || powerRanks.find((r) => cu.realm_name!.includes(r.name));
+          if (rk) {
+            if (typeof cu.realm_index === "number" && cu.realm_index !== rk.index) {
+              coerced.push(`${cu.name}: 境界名「${cu.realm_name}」→序号${rk.index}(模型误报${cu.realm_index})`);
+            }
+            cu.realm_index = rk.index;
+            cu.realm_name = rk.name;
+          }
+        } else if (prev && typeof cu.realm_index === "number" && cu.realm_index !== prev.realm_index) {
+          coerced.push(`${cu.name}: 未给境界名，序号${cu.realm_index}作废，保持${prev.realm_index}`);
+          cu.realm_index = prev.realm_index;
+        }
+        if (cu.breakthrough && prev && !(typeof cu.realm_index === "number" && cu.realm_index > prev.realm_index)) {
+          cu.breakthrough = false; // 升小层不是大境界突破
+        }
+      }
+      if (coerced.length) {
+        await M.log(env, { bookId, chapterNo: ch, level: "warn", stage: "update", message: `境界序号已由代码矫正: ${coerced.join("；")}` });
+      }
+
       const issues: any[] = validateDelta(charMap, delta, fores, {
         chapterNo: ch, planes, currentPlane,
         minBreakthroughGap: c.minBreakthroughGap, assetSurgeFactor: c.assetSurgeFactor,
@@ -225,7 +262,8 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
       const delta = JSON.parse(st.deltaJson!) as StateDelta;
       const outline = JSON.parse(st.outlineJson!) as ChapterOutline;
       const title = outline.title || `第${ch}章`;
-      const body = normalizeText(stripLeadingTitle(st.finalText!));
+      // 先 normalize 剥掉 Markdown 井号/围栏，再剥标题行（此前顺序反了，"## 第N章"逃过剥离导致正文标题重复），最后整章去重
+      const body = dedupeChapter(stripLeadingTitle(normalizeText(st.finalText!)), ch);
       const cleaned = `第${ch}章 ${title}\n\n${body}`;
       const wc = body.replace(/\s/g, "").length;
       const issuesText = [...(st.issues || [])];
@@ -268,6 +306,36 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
       // 章末结算单（代码生成的系统账）：存档喂给下一章当账目锚点，也发通知供人工核对
       const settlement = settlementText(delta, hero, ch, outline.location);
       await M.setPlot(env, bookId, "last_settlement", settlement);
+
+      // —— 长篇健康监控（闭环，移植自 main_engine2.py 的 health_monitor）——
+      // 每章体检四项：战斗/文戏占比、境界停滞、场景停滞、盟友(女主)长期缺席。
+      // 发现问题生成写作指令存入 health_todo，下一章 extract 时注入主笔提示，用完即清。
+      const health: any = (await M.getPlot(env, bookId, "__health")) || {};
+      const directives: string[] = [];
+      const combatKw = ["灵力", "剑", "杀", "血", "阵", "符", "轰", "斩", "偷袭", "毒", "护体", "厮杀", "爆"];
+      const combatHits = combatKw.reduce((a, k) => a + (body.includes(k) ? 1 : 0), 0);
+      health.combat = [...(health.combat || []), combatHits >= 6 ? 1 : 0].slice(-10);
+      if (health.combat.length >= 8) {
+        const ratio = health.combat.reduce((a: number, b: number) => a + b, 0) / health.combat.length;
+        if (ratio >= 0.8) directives.push("节奏：近10章战斗占比过高，读者会疲劳。本章放缓——写谋划、人情、经营或修炼沉淀，不要再开打。");
+        else if (ratio <= 0.1) directives.push("节奏：近10章几乎无冲突，张力散了。本章须引入一次真实威胁、对抗或危机。");
+      }
+      const realmKey = hero ? `${hero.realm_name}·${hero.realm_sub}` : "";
+      if (realmKey && realmKey === health.realm) {
+        const stall = ch - (health.realm_since ?? ch);
+        if (stall >= 20 && stall % 5 === 0) directives.push(`推进：主角境界已 ${stall} 章无寸进（连小层都没升）。近几章内给一次实打实的修为进展，给读者进度感——凡人流可以慢，但不能原地不动。`);
+      } else { health.realm = realmKey; health.realm_since = ch; }
+      const loc = outline.location || "";
+      if (loc && health.loc && (loc === health.loc || loc.includes(health.loc) || health.loc.includes(loc))) {
+        const stall = ch - (health.loc_since ?? ch);
+        if (stall >= 8 && stall % 4 === 0) directives.push(`推进：剧情已在「${loc}」附近停留 ${stall} 章。尽快转场，或让这个地点积压的矛盾总爆发。`);
+      } else { health.loc = loc; health.loc_since = ch; }
+      for (const ally of chars.filter((x) => x.role === "ally" && x.alive && x.last_seen_ch > 0)) {
+        const gap = ch - ally.last_seen_ch;
+        if (gap >= 40 && gap % 10 === 0) directives.push(`角色：「${ally.name}」已 ${gap} 章未出场，读者会忘。近几章找个自然的方式让其回归或至少被提及。`);
+      }
+      await M.setPlot(env, bookId, "__health", health);
+      if (directives.length) await M.setPlot(env, bookId, "health_todo", directives);
 
       const rewrites = st.attempt || 0;
       const qc = issuesText.length ? `\n质检: ${issuesText.join("；").slice(0, 300)}` : "";
@@ -382,7 +450,7 @@ async function rewriteStep(env: Env, bookId: string, st: GenState): Promise<GenS
   ], { temperature: 0.6, maxTokens: 7000 });
   const polished = humanized.text;
 
-  const body = normalizeText(stripLeadingTitle(polished));
+  const body = dedupeChapter(stripLeadingTitle(normalizeText(polished)), st.chapterNo);
   const title = ex.title || `第${st.chapterNo}章`;
   const cleaned = `第${st.chapterNo}章 ${title}\n\n${body}`;
   const wc = body.replace(/\s/g, "").length;
@@ -539,6 +607,37 @@ function settlementText(d: StateDelta, hero: import("./types").CharacterState | 
   const coord = location ? `｜坐标：${location}` : "";
   const status = hero?.status_notes ? `｜主角近况：${hero.status_notes.slice(0, 80)}` : "";
   return `第${ch}章系统结算｜收获：${gains.join("、") || "无"}｜消耗：${costs.join("、") || "无"}｜${bal}${coord}${status}`;
+}
+
+// 整章重复检测与截断（移植自 main_engine2.py 的 deduplicate_chapter）：
+// 模型长输出时偶发"重启续写"，把写完的正文从头再输出一遍。两重保险：
+//   1) 本章标题在正文 15% 之后再次出现 → 从该处截断
+//   2) 同一长段落(≥60字)在正文 30% 之后完整复现 → 从第二次出现处截断
+export function dedupeChapter(body: string, ch: number): string {
+  if (!body || body.length < 500) return body;
+  const titleRe = new RegExp(`第\\s*${ch}\\s*章`, "g");
+  let m: RegExpExecArray | null;
+  while ((m = titleRe.exec(body)) !== null) {
+    if (m.index > body.length * 0.15) {
+      const trimmed = body.slice(0, m.index).trim();
+      if (trimmed.length >= 400) return trimmed;
+    }
+  }
+  const paras = body.split("\n").filter((p) => p.trim().length >= 60);
+  const seen = new Set<string>();
+  for (const p of paras) {
+    const fp = p.slice(0, 60);
+    if (seen.has(fp)) {
+      const first = body.indexOf(fp);
+      const second = body.indexOf(fp, first + fp.length);
+      if (second > body.length * 0.3) {
+        const trimmed = body.slice(0, second).trim();
+        if (trimmed.length >= 400) return trimmed;
+      }
+    }
+    seen.add(fp);
+  }
+  return body;
 }
 
 function stripLeadingTitle(t: string): string {

@@ -196,10 +196,14 @@ export async function openForeshadowing(env: Env, bookId: string): Promise<Fores
 }
 
 export async function addForeshadow(env: Env, bookId: string, f: { title: string; detail: string; importance: number; planted_ch: number; due_ch?: number }) {
+  // 回收窗口下限：模型爱给"埋下2章后就该回收"的死线，导致超期警告刷屏。
+  // 最少留 15 章余地；没给就按重要度给长线（重要度越高越是长线伏笔）。
+  const defaultDue = f.planted_ch + 30 * Math.max(1, f.importance ?? 2);
+  const due = Math.max(f.due_ch ?? defaultDue, f.planted_ch + 15);
   await env.DB.prepare(
     `INSERT INTO foreshadowing (id,book_id,title,detail,status,planted_ch,due_ch,importance,updated_at)
      VALUES (?,?,?,?,'planted',?,?,?,?)`
-  ).bind(uid(), bookId, f.title, f.detail, f.planted_ch, f.due_ch ?? f.planted_ch + 50, f.importance, now()).run();
+  ).bind(uid(), bookId, f.title, f.detail, f.planted_ch, due, f.importance, now()).run();
 }
 
 export async function updateForeshadowByTitle(env: Env, bookId: string, title: string, status: string, ch: number) {
@@ -384,6 +388,7 @@ export function compileMemoryContext(p: {
   recentSums?: { chapter_no: number; summary: string }[]; // 最近10章摘要（滚动短期记忆）
   powerRanks?: PowerRank[];                              // 本书境界体系（决定境界叫法：N层 或 初/中/后/巅峰）
   settlement?: string;                                   // 上一章收支结算单（代码生成的系统账）
+  directives?: string[];                                 // 健康监控指令（上一章体检发现的问题，本章须执行）
 }): string {
   const realmOf = (c: CharacterState) => `${c.realm_name}${formatRealmSub(p.powerRanks, c.realm_index, c.realm_sub)}`;
   // 截断函数：法宝、功法、丹药等永远只列前 15 个，防止上下文被堆爆
@@ -480,6 +485,7 @@ export function compileMemoryContext(p: {
     `【已探索地图/势力（近40）】\n${map40.join("、") || "（无）"}`,
     `【主角家底与已习得能力（硬约束·面板为准）】\n${heroAssets}`,
     p.settlement ? `【上一章收支结算（系统对账单·与本章衔接的账目起点）】\n${p.settlement}` : "",
+    p.directives?.length ? `【健康监控指令（系统体检发现的问题，本章必须执行）】\n${p.directives.map((d) => `- ${d}`).join("\n")}` : "",
     `【在世/关键角色状态（按活跃度，最多25）】\n${charLines || "（暂无）"}`,
     loreLines ? `【本章相关设定卡（硬设定·不得违背，神通克制关系以此为准）】\n${loreLines}` : "",
     edgeLines ? `【相关人物/势力关系网（知识图谱）】\n${edgeLines}` : "",
@@ -529,10 +535,16 @@ export async function updateStoryDigest(env: Env, bookId: string, uptoChapter: n
 
 // ---------------- 死线清理（自动归档过期伏笔） ----------------
 export async function pruneDeadThreads(env: Env, bookId: string, chapterNo: number): Promise<void> {
-  // 【核心修改】：过期的伏笔不再被 dropped 彻底抛弃，而是进入 cold_storage（冷宫）。
-  // 防止修仙文动辄上千章的长线伏笔（如炼气期拿到的神秘断剑）被自动系统彻底抹杀。
+  // 过期伏笔进 cold_storage（冷宫）而非彻底抛弃，防长线伏笔被误杀。
+  // 低重要度超期 30 章即入冷宫（原 100 章太松，导致超期警告刷屏挤占上下文）。
   await env.DB.prepare(
-    "UPDATE foreshadowing SET status='cold_storage', updated_at=? WHERE book_id=? AND status NOT IN ('resolved','dropped','cold_storage') AND importance<=2 AND due_ch IS NOT NULL AND ?-due_ch>100"
+    "UPDATE foreshadowing SET status='cold_storage', updated_at=? WHERE book_id=? AND status NOT IN ('resolved','dropped','cold_storage') AND importance<=2 AND due_ch IS NOT NULL AND ?-due_ch>30"
+  ).bind(Date.now(), bookId, chapterNo).run();
+  // 高重要度伏笔超期后自动展期(防死锁，移植自 main_engine2 修复6)：
+  // 每次超期 10 章仍未回收，就把回收线后移 20 章，同时审核提醒依旧生效——
+  // 不逼模型在不合适的章节强塞回收，也不让同一条警告每章刷屏。
+  await env.DB.prepare(
+    "UPDATE foreshadowing SET due_ch=due_ch+20, updated_at=? WHERE book_id=? AND status NOT IN ('resolved','dropped','cold_storage') AND importance>=3 AND due_ch IS NOT NULL AND ?-due_ch>10"
   ).bind(Date.now(), bookId, chapterNo).run();
 }
 
