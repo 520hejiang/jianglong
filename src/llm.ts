@@ -91,13 +91,22 @@ try {
       throw new Error(`🚨 接口回包格式异常，找不到 choices！真实回包是: ${rawText}`);
     }
     // --- 插入结束 ---
-const text: string = data?.choices?.[0]?.message?.content ?? "";
+// 思考型模型(mimo)可能把答案留在 reasoning_content 或思考耗尽 token 返回空正文
+const msg0 = data?.choices?.[0]?.message ?? {};
+let text: string = msg0.content ?? "";
+if (!text || !text.trim()) {
+  const reasoning: string = msg0.reasoning_content ?? msg0.reasoning ?? "";
+  if (reasoning && reasoning.trim()) text = reasoning; // 兜底：有些网关只填思考字段
+}
+if (!text || !text.trim()) {
+  throw new Error("模型返回空正文(疑似思考型模型token耗尽)，重试");
+}
 return { text, usage: data?.usage };
     } catch (e: any) {
       lastErr = e;
       if (e?.fatal) break; // 4xx 类错误重试无意义，立刻报出去
       // 空回包多半是网关被限速后的软失败，与 429 同等对待用长退避
-      const rateish = String(e?.message || e).includes("空内容");
+      const rateish = /空内容|空正文/.test(String(e?.message || e));
       await sleep(rateish ? Math.min(60_000, 5000 * Math.pow(2, attempt)) : 1000 * Math.pow(2, attempt));
     }
   }
@@ -185,15 +194,21 @@ export async function chatJSON<T>(
       { role: "assistant", content: lastRaw.slice(0, 6000) },
       { role: "user", content: `你上面输出的 JSON 解析失败：${String(lastErr).slice(0, 200)}。请重新输出一份完整、合法的 JSON，规则：字符串值内部一律用中文引号「」，绝不出现未转义的英文双引号；所有括号必须闭合、逗号必须完整；除 JSON 本身外不要输出任何文字。` },
     ];
-    const r = await chat(env, msgs, {
-      temperature: i === 0 ? (opts.temperature ?? 0.5) : 0.15,
-      maxTokens,
-      json: true,
-    });
-    try { return parseJson<T>(r.text); }
-    catch (e) {
-      lastErr = e; lastRaw = r.text;
-      if (maxTokens) maxTokens = Math.ceil(maxTokens * 1.5); // 防截断：逐次放宽输出上限
+    let raw = "";
+    try {
+      const r = await chat(env, msgs, {
+        temperature: i === 0 ? (opts.temperature ?? 0.5) : 0.15,
+        maxTokens,
+        json: true,
+      });
+      raw = r.text;
+      return parseJson<T>(raw);
+    } catch (e) {
+      lastErr = e;
+      lastRaw = raw;
+      // 空正文=思考型模型把 token 烧在思考上，额度直接翻倍；普通解析失败放宽1.5倍
+      const empty = !raw || /空正文|空内容/.test(String(e));
+      if (maxTokens) maxTokens = Math.ceil(maxTokens * (empty ? 2.5 : 1.5));
     }
   }
   const snippet = lastRaw ? `｜模型原始输出首尾: ${lastRaw.slice(0, 160)} …… ${lastRaw.slice(-160)}` : "";

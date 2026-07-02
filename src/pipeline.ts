@@ -113,7 +113,7 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
         focus = await chatJSON<any>(env, [
           { role: "system", content: stylePrefix + fill(await tpl(env, bookId, "extract", PROMPT_EXTRACT), { CH: ch }) },
           { role: "user", content: fill("【本卷大纲】\n{{VOLUME}}\n\n【当前世界状态】\n{{MEMORY}}", { VOLUME: volText, MEMORY: baseMem }) },
-        ], { temperature: 0.4, maxTokens: 800 });
+        ], { temperature: 0.4, maxTokens: 1400 });
       } catch { focus = { must_use_entities: [] }; }
       focus.must_use_entities ??= [];
       await M.log(env, { bookId, chapterNo: ch, stage: "extract", message: `focus: ${focus.focus || "-"}`, meta: focus });
@@ -173,7 +173,7 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
           { role: "system", content: fill(await tpl(env, bookId, "judge", PROMPT_JUDGE), { CH: ch }) },
           { role: "user", content: fill("【本章细纲】\n{{OUTLINE}}\n\n【候选A】\n{{A}}\n\n【候选B】\n{{B}}",
               { OUTLINE: st.outlineJson!, A: st.draft!, B: st.draftB || "" }) },
-        ], { temperature: 0.2, maxTokens: 400 });
+        ], { temperature: 0.2, maxTokens: 1200 }); // 思考型模型余量：思考也烧token，给小了正文为空
         const winner = r?.winner === "B" ? "B" : "A";
         await M.log(env, { bookId, chapterNo: ch, stage: "judge", message: `双稿择优: ${winner}胜｜${String(r?.reason || "").slice(0, 80)}` });
         return { ...st, stage: "polish", draft: winner === "B" ? st.draftB! : st.draft!, draftB: undefined };
@@ -212,7 +212,7 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
           { role: "system", content: stylePrefix + fill(await tpl(env, bookId, "editor", PROMPT_EDITOR), { CH: ch, BAR: c.qualityBar }) },
           { role: "user", content: fill("【本章定稿】\n{{TEXT}}\n\n【本章细纲】\n{{OUTLINE}}\n\n【当前世界状态（对照查矛盾）】\n{{MEMORY}}",
               { TEXT: st.finalText!, OUTLINE: st.outlineJson!, MEMORY: st.memory! }) },
-        ], { temperature: 0.2, maxTokens: 1800 });
+        ], { temperature: 0.2, maxTokens: 2400 });
         const score = typeof r.score === "number" && Number.isFinite(r.score) ? Math.round(r.score) : 80;
         const fatal: string[] = Array.isArray(r.fatal_issues) ? r.fatal_issues.map((x: any) => String(x)) : [];
         const advice: string[] = Array.isArray(r.advice) ? r.advice.map((x: any) => String(x)) : [];
@@ -384,7 +384,7 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
           const r = await chat(env, [
             { role: "system", content: fill(await tpl(env, bookId, "digest", PROMPT_DIGEST), {}) },
             { role: "user", content: `【已有前情提要】\n${oldDigest || "（无）"}\n\n【最近章节摘要】\n${recent}` },
-          ], { temperature: 0.3, maxTokens: 900 });
+          ], { temperature: 0.3, maxTokens: 1400 });
           return r.text;
         });
         // 连贯性巡检：AI 通读近10章摘要+面板揪矛盾，生成"找补指令"喂给下一章自动圆回来
@@ -394,7 +394,7 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
           const sweep = await chatJSON<any>(env, [
             { role: "system", content: await tpl(env, bookId, "consistency", PROMPT_CONSISTENCY) },
             { role: "user", content: `【最近章节摘要】\n${sumText}\n\n【当前世界状态】\n${(st.memory || "").slice(0, 8000)}` },
-          ], { temperature: 0.1, maxTokens: 900 });
+          ], { temperature: 0.1, maxTokens: 1400 });
           const issues: string[] = Array.isArray(sweep?.issues) ? sweep.issues.map(String) : [];
           const patches: string[] = Array.isArray(sweep?.patch_directives) ? sweep.patch_directives.map(String) : [];
           if (issues.length) await M.log(env, { bookId, chapterNo: ch, level: "warn", stage: "consistency", message: `巡检发现 ${issues.length} 处矛盾`, meta: { issues, patches } });
