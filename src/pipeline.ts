@@ -489,9 +489,11 @@ async function applyDelta(env: Env, bookId: string, ch: number, d: StateDelta, b
 function stripLeadingTitle(t: string): string {
   const lines = t.replace(/\r\n/g, "\n").split("\n");
   let i = 0;
-  while (i < lines.length && lines[i].trim() === "") i++;
-  if (i < lines.length && /^第\s*[\d〇零一二三四五六七八九十百千两]+\s*章/.test(lines[i].trim())) {
-    i++;
+  // 模型偶尔把标题行写两遍（曾致正文出现重复标题），循环剥掉开头所有标题行
+  while (i < lines.length) {
+    const s = lines[i].trim();
+    if (s === "" || /^第\s*[\d〇零一二三四五六七八九十百千两]+\s*章/.test(s)) { i++; continue; }
+    break;
   }
   return lines.slice(i).join("\n");
 }
