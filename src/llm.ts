@@ -208,7 +208,7 @@ export async function chatJSON<T>(
       lastRaw = raw;
       // 空正文=思考型模型把 token 烧在思考上，额度直接翻倍；普通解析失败放宽1.5倍
       const empty = !raw || /空正文|空内容/.test(String(e));
-      if (maxTokens) maxTokens = Math.ceil(maxTokens * (empty ? 2.5 : 1.5));
+      if (maxTokens) maxTokens = Math.min(16000, Math.ceil(maxTokens * (empty ? 2.5 : 1.5))); // 封顶防超上下文被拒单
     }
   }
   const snippet = lastRaw ? `｜模型原始输出首尾: ${lastRaw.slice(0, 160)} …… ${lastRaw.slice(-160)}` : "";

@@ -113,7 +113,7 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
         focus = await chatJSON<any>(env, [
           { role: "system", content: stylePrefix + fill(await tpl(env, bookId, "extract", PROMPT_EXTRACT), { CH: ch }) },
           { role: "user", content: fill("【本卷大纲】\n{{VOLUME}}\n\n【当前世界状态】\n{{MEMORY}}", { VOLUME: volText, MEMORY: baseMem }) },
-        ], { temperature: 0.4, maxTokens: 1400 });
+        ], { temperature: 0.4, maxTokens: 4000 });
       } catch { focus = { must_use_entities: [] }; }
       focus.must_use_entities ??= [];
       await M.log(env, { bookId, chapterNo: ch, stage: "extract", message: `focus: ${focus.focus || "-"}`, meta: focus });
@@ -145,7 +145,7 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
           { role: "system", content: stylePrefix + fill(await tpl(env, bookId, "review", PROMPT_REVIEW), { CH: ch }) },
           { role: "user", content: fill("【待审细纲】\n{{OUTLINE}}\n\n【当前世界状态】\n{{MEMORY}}\n\n【超期伏笔提醒】\n{{OVERDUE}}",
               { OUTLINE: JSON.stringify(outline), MEMORY: st.memory!, OVERDUE: overdue }) },
-        ], { temperature: 0.3, maxTokens: 2800, json: true }); // revised_outline 是完整细纲，上限要够
+        ], { temperature: 0.3, maxTokens: 6000, json: true }); // revised_outline 是完整细纲+思考余量
         let review: any;
         try { review = parseJson(reviewRaw.text); } catch { break; }
         if (review.approved) break;
@@ -173,7 +173,7 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
           { role: "system", content: fill(await tpl(env, bookId, "judge", PROMPT_JUDGE), { CH: ch }) },
           { role: "user", content: fill("【本章细纲】\n{{OUTLINE}}\n\n【候选A】\n{{A}}\n\n【候选B】\n{{B}}",
               { OUTLINE: st.outlineJson!, A: st.draft!, B: st.draftB || "" }) },
-        ], { temperature: 0.2, maxTokens: 1200 }); // 思考型模型余量：思考也烧token，给小了正文为空
+        ], { temperature: 0.2, maxTokens: 4000 }); // 思考型模型余量：思考也烧token，上限不用不收钱，往高给
         const winner = r?.winner === "B" ? "B" : "A";
         await M.log(env, { bookId, chapterNo: ch, stage: "judge", message: `双稿择优: ${winner}胜｜${String(r?.reason || "").slice(0, 80)}` });
         return { ...st, stage: "polish", draft: winner === "B" ? st.draftB! : st.draft!, draftB: undefined };
@@ -212,7 +212,7 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
           { role: "system", content: stylePrefix + fill(await tpl(env, bookId, "editor", PROMPT_EDITOR), { CH: ch, BAR: c.qualityBar }) },
           { role: "user", content: fill("【本章定稿】\n{{TEXT}}\n\n【本章细纲】\n{{OUTLINE}}\n\n【当前世界状态（对照查矛盾）】\n{{MEMORY}}",
               { TEXT: st.finalText!, OUTLINE: st.outlineJson!, MEMORY: st.memory! }) },
-        ], { temperature: 0.2, maxTokens: 2400 });
+        ], { temperature: 0.2, maxTokens: 6000 });
         const score = typeof r.score === "number" && Number.isFinite(r.score) ? Math.round(r.score) : 80;
         const fatal: string[] = Array.isArray(r.fatal_issues) ? r.fatal_issues.map((x: any) => String(x)) : [];
         const advice: string[] = Array.isArray(r.advice) ? r.advice.map((x: any) => String(x)) : [];
@@ -240,7 +240,7 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
             { role: "system", content: fill(await tpl(env, bookId, "audit", PROMPT_DELTA_AUDIT), { CH: ch }) },
             { role: "user", content: fill("【本章定稿】\n{{TEXT}}\n\n【待审状态增量】\n{{DELTA}}\n\n【当前世界状态（面板对照）】\n{{MEMORY}}",
                 { TEXT: st.finalText!, DELTA: JSON.stringify(delta), MEMORY: st.memory! }) },
-          ], { temperature: 0.1, maxTokens: 3200 });
+          ], { temperature: 0.1, maxTokens: 6000 });
           if (audited && Array.isArray(audited.characters)) {
             audited.characters ??= []; audited.foreshadow_new ??= []; audited.foreshadow_update ??= [];
             audited.lore ??= []; audited.edges ??= []; audited.plot ??= {}; audited.tags ??= []; audited.summary ??= delta.summary;
@@ -384,7 +384,7 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
           const r = await chat(env, [
             { role: "system", content: fill(await tpl(env, bookId, "digest", PROMPT_DIGEST), {}) },
             { role: "user", content: `【已有前情提要】\n${oldDigest || "（无）"}\n\n【最近章节摘要】\n${recent}` },
-          ], { temperature: 0.3, maxTokens: 1400 });
+          ], { temperature: 0.3, maxTokens: 4000 });
           return r.text;
         });
         // 连贯性巡检：AI 通读近10章摘要+面板揪矛盾，生成"找补指令"喂给下一章自动圆回来
@@ -394,7 +394,7 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
           const sweep = await chatJSON<any>(env, [
             { role: "system", content: await tpl(env, bookId, "consistency", PROMPT_CONSISTENCY) },
             { role: "user", content: `【最近章节摘要】\n${sumText}\n\n【当前世界状态】\n${(st.memory || "").slice(0, 8000)}` },
-          ], { temperature: 0.1, maxTokens: 1400 });
+          ], { temperature: 0.1, maxTokens: 4000 });
           const issues: string[] = Array.isArray(sweep?.issues) ? sweep.issues.map(String) : [];
           const patches: string[] = Array.isArray(sweep?.patch_directives) ? sweep.patch_directives.map(String) : [];
           if (issues.length) await M.log(env, { bookId, chapterNo: ch, level: "warn", stage: "consistency", message: `巡检发现 ${issues.length} 处矛盾`, meta: { issues, patches } });
@@ -563,7 +563,7 @@ async function rewriteStep(env: Env, bookId: string, st: GenState): Promise<GenS
     { role: "system", content: `你是一位纯正的人类网文作家。请把【初稿】里的“AI腔、生硬的词汇、模板化的套路”全部磨掉，换成中文人类的口语化表达、真实的动作细节和内心戏。
 【关键底线】严禁使用：仿佛、不禁、瞬间、竟然、居然、与此同时、不仅...而且、首先/其次。禁止替换原文的专有名词、人物名字、境界等级和灵石数量，只改文笔！` },
     { role: "user", content: `【初稿】\n${ex.content}` }
-  ], { temperature: 0.6, maxTokens: 7000 });
+  ], { temperature: 0.6, maxTokens: 10000 });
   const polished = humanized.text;
 
   const body = dedupeChapter(stripLeadingTitle(normalizeText(polished)), st.chapterNo);
@@ -591,7 +591,7 @@ async function genOutline(env: Env, bookId: string, ch: number, volText: string,
     { role: "system", content: sp + fill(await tpl(env, bookId, "outline", PROMPT_OUTLINE), { CH: ch, CMIN: c.charsMin, CMAX: c.charsMax }) },
     { role: "user", content: fill("【本章焦点】\n{{FOCUS}}\n\n【本卷大纲】\n{{VOLUME}}\n\n【当前世界状态】\n{{MEMORY}}",
         { FOCUS: focus, VOLUME: volText, MEMORY: memory }) },
-  ], { temperature: 0.7, maxTokens: 2600 }); // 细纲含战斗阶段/支线等新字段，1600 会截断
+  ], { temperature: 0.7, maxTokens: 5000 }); // 细纲含战斗阶段/支线等新字段，思考型模型再留翻倍余量
 }
 
 async function genDraft(env: Env, bookId: string, ch: number, outline: ChapterOutline, memory: string, tail: string, c: ReturnType<typeof cfg>, sp: string, openings: string, temperature = 0.85): Promise<string> {
@@ -609,7 +609,7 @@ async function genDraft(env: Env, bookId: string, ch: number, outline: ChapterOu
         { CH: ch, CMIN: c.charsMin, CMAX: c.charsMax, TITLE: outline.title, OPENINGS: openings }) },
     { role: "user", content: fill("【本章细纲】\n{{OUTLINE}}\n\n【当前关键角色状态】\n{{MEMORY}}\n\n【上一章结尾】\n{{TAIL}}",
         { OUTLINE: JSON.stringify(outline), MEMORY: memorySlim, TAIL: tail }) },
-  ], { temperature, maxTokens: 7000 });
+  ], { temperature, maxTokens: 10000 });
   return raw.text;
 }
 
@@ -617,7 +617,7 @@ async function polish(env: Env, bookId: string, ch: number, draft: string, memor
   const raw = await chat(env, [
     { role: "system", content: sp + fill(await tpl(env, bookId, "polish", PROMPT_POLISH), { CH: ch, CMIN: c.charsMin, CMAX: c.charsMax }) },
     { role: "user", content: fill("【初稿】\n{{DRAFT}}\n\n【当前世界状态】\n{{MEMORY}}", { DRAFT: draft, MEMORY: memory }) },
-  ], { temperature: 0.6, maxTokens: 7000 });
+  ], { temperature: 0.6, maxTokens: 10000 });
   return raw.text || draft;
 }
 
@@ -625,7 +625,7 @@ async function extractDelta(env: Env, bookId: string, ch: number, text: string, 
   const d = await chatJSON<StateDelta>(env, [
     { role: "system", content: sp + fill(await tpl(env, bookId, "update", PROMPT_UPDATE), { CH: ch }) },
     { role: "user", content: fill("【本章定稿】\n{{TEXT}}\n\n【当前世界状态】\n{{MEMORY}}", { TEXT: text, MEMORY: memory }) },
-  ], { temperature: 0.2, maxTokens: 3000 }); // 状态增量含设定卡/图谱/人物演化，2000 会截断
+  ], { temperature: 0.2, maxTokens: 6000 }); // 状态增量含设定卡/图谱/人物演化+思考余量
   d.characters ??= []; d.foreshadow_new ??= []; d.foreshadow_update ??= [];
   d.lore ??= []; d.edges ??= [];
   d.plot ??= {}; d.tags ??= []; d.summary ??= "";
