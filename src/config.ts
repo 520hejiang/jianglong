@@ -19,7 +19,7 @@ export const cfg = (env: Env) => ({
 
   // 极致质量三件套（不差钱模式，全部默认开启）：
   bestOf: parseInt(env.DRAFT_BEST_OF || "2", 10),          // 每章写N版正文，AI评委择优（1=关闭）
-  llmCallGapMs: parseInt(env.LLM_CALL_GAP_MS || "3000", 10), // 两次LLM调用最小间隔(毫秒)，防网关限速
+  llmCallGapMs: parseInt(env.LLM_CALL_GAP_MS || "6000", 10), // 两次LLM调用最小间隔(毫秒)，防网关限速(不急，稳字当头)
   deltaAudit: (env.DELTA_AUDIT || "on") as "on" | "off",   // 记忆抽取二次审计：AI对照正文复核账目/道具/境界
   consistencyEvery: 10,                                     // 每N章一次全书连贯性巡检，矛盾自动生成找补指令
   

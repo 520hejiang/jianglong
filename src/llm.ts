@@ -96,7 +96,9 @@ return { text, usage: data?.usage };
     } catch (e: any) {
       lastErr = e;
       if (e?.fatal) break; // 4xx 类错误重试无意义，立刻报出去
-      await sleep(1000 * Math.pow(2, attempt));
+      // 空回包多半是网关被限速后的软失败，与 429 同等对待用长退避
+      const rateish = String(e?.message || e).includes("空内容");
+      await sleep(rateish ? Math.min(60_000, 5000 * Math.pow(2, attempt)) : 1000 * Math.pow(2, attempt));
     }
   }
   throw new Error(`DeepSeek 调用失败: ${String(lastErr)}`);

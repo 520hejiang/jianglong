@@ -108,12 +108,14 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
         events, recentSums, powerRanks, settlement, directives,
         lastSummary: last?.summary || "", lastTail: last?.ending_tail || "",
       });
-      const extractRaw = await chat(env, [
-        { role: "system", content: stylePrefix + fill(await tpl(env, bookId, "extract", PROMPT_EXTRACT), { CH: ch }) },
-        { role: "user", content: fill("【本卷大纲】\n{{VOLUME}}\n\n【当前世界状态】\n{{MEMORY}}", { VOLUME: volText, MEMORY: baseMem }) },
-      ], { temperature: 0.4, maxTokens: 800, json: true });
       let focus: any = {};
-      try { focus = parseJson(extractRaw.text); } catch { focus = { must_use_entities: [] }; }
+      try {
+        focus = await chatJSON<any>(env, [
+          { role: "system", content: stylePrefix + fill(await tpl(env, bookId, "extract", PROMPT_EXTRACT), { CH: ch }) },
+          { role: "user", content: fill("【本卷大纲】\n{{VOLUME}}\n\n【当前世界状态】\n{{MEMORY}}", { VOLUME: volText, MEMORY: baseMem }) },
+        ], { temperature: 0.4, maxTokens: 800 });
+      } catch { focus = { must_use_entities: [] }; }
+      focus.must_use_entities ??= [];
       await M.log(env, { bookId, chapterNo: ch, stage: "extract", message: `focus: ${focus.focus || "-"}`, meta: focus });
       // RAG：拿着本章焦点实体，先查倒排索引召回历史章节、再查设定卡与关系图谱，
       // 只喂"最相关的几 KB"而不是整本书——写第 1827 章时混沌剑的所有旧设定都在
