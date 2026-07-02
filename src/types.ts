@@ -19,6 +19,7 @@ export interface Env {
   MAX_REWRITE?: string;  // 单章最多回炉次数（质检+主编共享额度），默认 3
   DRAFT_BEST_OF?: string; // 每章写N版正文由AI评委择优，默认 2
   DELTA_AUDIT?: string;   // on | off，记忆抽取二次审计，默认 on
+  LLM_CALL_GAP_MS?: string; // 两次LLM调用最小间隔毫秒，默认3000，防网关限速
   // secrets
   DEEPSEEK_API_KEY: string;
   TELEGRAM_BOT_TOKEN?: string;

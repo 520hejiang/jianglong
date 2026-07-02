@@ -130,7 +130,7 @@ async function main() {
     DB: new D1(db), KV: new KV(), GEN_QUEUE: { send: async () => {} },
     DEEPSEEK_MODEL: 'mock', DEEPSEEK_BASE_URL: 'http://mock', TARGET_CHARS_MIN: '2500',
     TARGET_CHARS_MAX: '3000', MAX_CONTEXT_TOKENS: '60000', MIN_BREAKTHROUGH_GAP: '20',
-    POLISH_MODE: 'auto', DEEPSEEK_API_KEY: 'x', ADMIN_TOKEN: 'x',
+    POLISH_MODE: 'auto', DEEPSEEK_API_KEY: 'x', ADMIN_TOKEN: 'x', LLM_CALL_GAP_MS: '0',
   };
 
   // 用真实大纲 JSON 建书

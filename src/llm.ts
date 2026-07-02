@@ -33,8 +33,9 @@ export async function chat(
 // if (opts.json) body.response_format = { type: "json_object" };
 
   let lastErr: unknown;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 5; attempt++) {
     try {
+      await throttle(c.llmCallGapMs); // 调用间强制间隔，压平突发速率防 429
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 999_000); // 单次最长 999s
       const res = await fetch(`${c.baseUrl}/chat/completions`, {
@@ -50,7 +51,10 @@ export async function chat(
 
       if (res.status === 429 || res.status >= 500) {
         lastErr = new Error(`LLM ${res.status}: ${await safeText(res)}`);
-        await sleep(1000 * Math.pow(2, attempt)); // 退避 1s,2s,4s
+        // 429 用长退避(5s,10s,20s,40s,60s)等限速窗口过去；5xx 用短退避
+        await sleep(res.status === 429
+          ? Math.min(60_000, 5000 * Math.pow(2, attempt))
+          : 1000 * Math.pow(2, attempt));
         continue;
       }
       if (!res.ok) {
@@ -195,6 +199,16 @@ export async function chatJSON<T>(
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// 同一次执行内的调用节流：两次 LLM 调用之间至少间隔 minGap 毫秒，
+// 把 13 道工序的连环调用压平成匀速流，避免触发网关"每分钟请求数"限速。
+let _lastCallAt = 0;
+async function throttle(minGap: number) {
+  if (!minGap || minGap <= 0) return;
+  const wait = _lastCallAt + minGap - Date.now();
+  if (wait > 0) await sleep(wait);
+  _lastCallAt = Date.now();
+}
 async function safeText(res: Response) {
   try { return await res.text(); } catch { return "<no body>"; }
 }

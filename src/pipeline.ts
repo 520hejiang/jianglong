@@ -476,7 +476,9 @@ export async function generateChapter(env: Env, bookId: string, chapterNo: numbe
 
 export async function advanceBook(env: Env, bookId: string, budgetMs = 18000): Promise<"completed" | "progress" | "idle"> {
   const start = Date.now();
-  const got = await M.acquireLock(env, bookId, 120);
+  // 锁有效期须大于最长单步耗时(写正文2-4分钟)：过短会让下一个cron误判无人干活、
+  // 重复执行同一步，调用量翻倍直接撞爆限速(实测故障)
+  const got = await M.acquireLock(env, bookId, 360);
   if (!got) return "idle";
   try {
     const book = await M.getBook(env, bookId);
