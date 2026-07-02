@@ -38,7 +38,7 @@ class KV {
 }
 
 // ---------------- mock DeepSeek：按 system prompt 判定阶段，返回假数据 ----------------
-const calls = { extract: 0, outline: 0, review: 0, draft: 0, polish: 0, editor: 0, update: 0 };
+const calls = { extract: 0, outline: 0, review: 0, draft: 0, judge: 0, audit: 0, consistency: 0, polish: 0, editor: 0, update: 0 };
 
 function spiritDelta(ch) {
   if (ch % 5 === 0) return 30;       // 缴获
@@ -108,6 +108,9 @@ globalThis.fetch = async (_url, init) => {
   else if (sys.includes('生成一份单章细纲')) { calls.outline++; content = JSON.stringify({ title: `暗巷杀机${ch}`, goal: '推进主线', beats: ['踩点', '伏击', '收割'], characters: ['陆长安'], location: '坊市暗巷', conflicts: '黑吃黑', protagonist_cards: ['毒粉', '四象困煞阵'], foreshadow_plant: [], foreshadow_resolve: [], power_notes: '同阶险胜', hook: '有人在暗处盯着他', subplot: '与柳青蝉的暗中交易推进一步', breakthrough_due: ch === 26, battle_scale: 'skirmish', battle_stages: [] }); }
   else if (sys.includes('严格的设定校验官')) { calls.review++; content = JSON.stringify({ approved: true, issues: [], revised_outline: {} }); }
   else if (sys.includes('根据细纲撰写')) { calls.draft++; content = makeDraft(ch); }
+  else if (sys.includes('评委')) { calls.judge++; content = JSON.stringify({ winner: 'A', reason: '节奏更紧' }); }
+  else if (sys.includes('审计员')) { calls.audit++; content = makeDelta(ch); }
+  else if (sys.includes('巡检员')) { calls.consistency++; content = JSON.stringify({ issues: [], patch_directives: [] }); }
   else if (sys.includes('终审')) { calls.editor++; content = JSON.stringify({ score: 86, verdict: 'pass', fatal_issues: [], advice: ['结尾钩子可以更狠一点'] }); }
   else if (sys.includes('老编辑') || sys.includes('润色')) { calls.polish++; content = makeDraft(ch).replace(/空气仿佛凝固，不知过了多久，他嘴角勾起一抹弧度。\n\n/, ''); }
   else if (sys.includes('抽取本章发生的状态变化')) { calls.update++; content = makeDelta(ch); }
@@ -243,6 +246,12 @@ async function main() {
 
   // AI 主编终审：每章都过审，评分随质检报告归档
   ok(calls.editor >= N, 'AI 主编终审每章执行', `editor 调用 ${calls.editor} 次`);
+  // 双稿择优：每章两版正文+评委二选一
+  ok(calls.judge >= N && calls.draft >= N * 2, '双稿择优每章执行(两版正文+评委)', `draft ${calls.draft} / judge ${calls.judge}`);
+  // 抽取二次审计：每章复核账目道具境界
+  ok(calls.audit >= N, '状态增量二次审计每章执行', `audit 调用 ${calls.audit} 次`);
+  // 连贯性巡检：每10章一次(第10/20章)
+  ok(calls.consistency >= 2, '连贯性巡检每10章执行', `consistency 调用 ${calls.consistency} 次`);
   const qcRow = await env.DB.prepare("SELECT qc_report FROM chapters WHERE book_id=? AND chapter_no=10").bind(bookId).first();
   const qcObj = JSON.parse(qcRow.qc_report);
   ok(qcObj.editor_score === 86, '主编评分写入质检报告', `score=${qcObj.editor_score}`);

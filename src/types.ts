@@ -17,6 +17,8 @@ export interface Env {
   EDITOR_MODE?: string;  // on | off，默认 on：每章过一遍 AI 主编终审（评分+硬伤扫描，不合格打回重写）
   QUALITY_BAR?: string;  // 主编评分及格线，默认 75，低于此分打回重写
   MAX_REWRITE?: string;  // 单章最多回炉次数（质检+主编共享额度），默认 3
+  DRAFT_BEST_OF?: string; // 每章写N版正文由AI评委择优，默认 2
+  DELTA_AUDIT?: string;   // on | off，记忆抽取二次审计，默认 on
   // secrets
   DEEPSEEK_API_KEY: string;
   TELEGRAM_BOT_TOKEN?: string;

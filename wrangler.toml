@@ -49,6 +49,8 @@ POLISH_MODE = "always"         # always=每章都过"毒舌老编辑"润色(治A
 EDITOR_MODE = "on"             # on=每章过AI主编终审(评分+硬伤扫描,不合格打回重写,极致质量) / off=关闭
 QUALITY_BAR = "75"             # 主编评分及格线,低于此分打回重写
 MAX_REWRITE = "3"              # 单章最多回炉次数(代码质检+AI主编共享额度)
+DRAFT_BEST_OF = "2"            # 每章写N版正文由AI评委择优(2=双稿择优,1=关闭)
+DELTA_AUDIT = "on"             # 记忆抽取二次审计:AI对照正文复核账目/道具/境界,漏记幽灵全纠正
 
 # 需要用 secret 注入的机密（不要写在这里）：
 #   wrangler secret put DEEPSEEK_API_KEY

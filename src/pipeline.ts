@@ -9,6 +9,7 @@ import * as M from "./memory";
 import { validateDelta, hasBlocking, formatIssues, detectSlop, detectLedgerLeaks, detectRealmMisnaming } from "./validators";
 import {
   PROMPT_EXTRACT, PROMPT_OUTLINE, PROMPT_REVIEW, PROMPT_DRAFT, PROMPT_POLISH, PROMPT_EDITOR, PROMPT_UPDATE, PROMPT_DIGEST,
+  PROMPT_JUDGE, PROMPT_DELTA_AUDIT, PROMPT_CONSISTENCY,
 } from "./prompts";
 import { tg } from "./telegram";
 
@@ -38,7 +39,7 @@ export interface ChapterResult {
 }
 
 // 生成阶段（断点续传：每完成一步存档，被掐断也能从断点继续）
-type Stage = "extract" | "outline" | "review" | "draft" | "polish" | "editor" | "update" | "finalize" | "rewrite" | "complete";
+type Stage = "extract" | "outline" | "review" | "draft" | "draft2" | "judge" | "polish" | "editor" | "update" | "finalize" | "rewrite" | "complete";
 
 export interface GenState {
   chapterNo: number;
@@ -60,6 +61,7 @@ export interface GenState {
   startedAt?: number;
   editorScore?: number;   // AI 主编终审评分
   editorNotes?: string[]; // 主编意见（存入质检报告）
+  draftB?: string;        // 双稿择优的第二候选
 }
 
 const GENJOB_KEY = "__genjob";
@@ -152,8 +154,31 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
     }
     case "draft": {
       const outline = JSON.parse(st.outlineJson!) as ChapterOutline;
-      const draft = await genDraft(env, bookId, ch, outline, st.memory!, st.lastTail || "", c, stylePrefix, st.openings || "");
-      return { ...st, stage: "polish", draft };
+      const draft = await genDraft(env, bookId, ch, outline, st.memory!, st.lastTail || "", c, stylePrefix, st.openings || "", 0.85);
+      // 双稿择优：重写回炉时不再双稿（回炉稿已带针对性意见），首written走 best-of-2
+      return { ...st, stage: c.bestOf >= 2 && st.attempt === 0 ? "draft2" : "polish", draft };
+    }
+    // 第二候选稿：更高温度写一版风格更放开的，交给评委二选一
+    case "draft2": {
+      const outline = JSON.parse(st.outlineJson!) as ChapterOutline;
+      const draftB = await genDraft(env, bookId, ch, outline, st.memory!, st.lastTail || "", c, stylePrefix, st.openings || "", 0.95);
+      return { ...st, stage: "judge", draftB };
+    }
+    // AI 评委：两份候选按六维度硬性二选一，胜者进润色。评委故障→保守用A稿。
+    case "judge": {
+      try {
+        const r = await chatJSON<any>(env, [
+          { role: "system", content: fill(await tpl(env, bookId, "judge", PROMPT_JUDGE), { CH: ch }) },
+          { role: "user", content: fill("【本章细纲】\n{{OUTLINE}}\n\n【候选A】\n{{A}}\n\n【候选B】\n{{B}}",
+              { OUTLINE: st.outlineJson!, A: st.draft!, B: st.draftB || "" }) },
+        ], { temperature: 0.2, maxTokens: 400 });
+        const winner = r?.winner === "B" ? "B" : "A";
+        await M.log(env, { bookId, chapterNo: ch, stage: "judge", message: `双稿择优: ${winner}胜｜${String(r?.reason || "").slice(0, 80)}` });
+        return { ...st, stage: "polish", draft: winner === "B" ? st.draftB! : st.draft!, draftB: undefined };
+      } catch (e) {
+        await M.log(env, { bookId, chapterNo: ch, level: "warn", stage: "judge", message: `评委故障，保守采用A稿: ${String(e).slice(0, 100)}` });
+        return { ...st, stage: "polish", draftB: undefined };
+      }
     }
     case "polish": {
       const slop = detectSlop(st.draft!);
@@ -203,7 +228,33 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
       }
     }
     case "update": {
-      const delta = await extractDelta(env, bookId, ch, st.finalText!, st.memory!, stylePrefix);
+      let delta = await extractDelta(env, bookId, ch, st.finalText!, st.memory!, stylePrefix);
+
+      // 【抽取二次审计】AI 对照正文复核账目/道具/境界字段：漏记的消耗补上、
+      // 幽灵登记删掉、凭空流水剔除。审计故障→用原始抽取结果，不阻塞。
+      if (c.deltaAudit === "on") {
+        try {
+          const audited = await chatJSON<StateDelta>(env, [
+            { role: "system", content: fill(await tpl(env, bookId, "audit", PROMPT_DELTA_AUDIT), { CH: ch }) },
+            { role: "user", content: fill("【本章定稿】\n{{TEXT}}\n\n【待审状态增量】\n{{DELTA}}\n\n【当前世界状态（面板对照）】\n{{MEMORY}}",
+                { TEXT: st.finalText!, DELTA: JSON.stringify(delta), MEMORY: st.memory! }) },
+          ], { temperature: 0.1, maxTokens: 3200 });
+          if (audited && Array.isArray(audited.characters)) {
+            audited.characters ??= []; audited.foreshadow_new ??= []; audited.foreshadow_update ??= [];
+            audited.lore ??= []; audited.edges ??= []; audited.plot ??= {}; audited.tags ??= []; audited.summary ??= delta.summary;
+            for (const cu of audited.characters) {
+              if (Array.isArray(cu.stone_moves) && cu.stone_moves.length) {
+                cu.spirit_stones_delta = cu.stone_moves.reduce(
+                  (acc, m) => acc + (typeof m?.amount === "number" && Number.isFinite(m.amount) ? Math.trunc(m.amount) : 0), 0);
+              }
+            }
+            delta = audited;
+            await M.log(env, { bookId, chapterNo: ch, stage: "audit", message: "状态增量已通过二次审计" });
+          }
+        } catch (e) {
+          await M.log(env, { bookId, chapterNo: ch, level: "warn", stage: "audit", message: `增量审计故障，采用原始抽取: ${String(e).slice(0, 100)}` });
+        }
+      }
 
       // 【境界序号权没收】realm_index 由代码按境界名推导，模型报错也无效：
       // 模型常把"练气一层→二层"误报成大境界+1，触发误拦截。规则：
@@ -325,6 +376,7 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
       await M.log(env, { bookId, chapterNo: ch, stage: "update", message: `第${ch}章完成，${wc}字`, meta: { wc, issues: issuesText } });
 
       await M.pruneDeadThreads(env, bookId, ch);
+      const patchDirectives: string[] = [];
       if (ch % 10 === 0) {
         await M.updateStoryDigest(env, bookId, ch, async (oldDigest, recent) => {
           const r = await chat(env, [
@@ -333,6 +385,22 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
           ], { temperature: 0.3, maxTokens: 900 });
           return r.text;
         });
+        // 连贯性巡检：AI 通读近10章摘要+面板揪矛盾，生成"找补指令"喂给下一章自动圆回来
+        try {
+          const sums = await M.recentSummaries(env, bookId, 10);
+          const sumText = sums.map((x) => `第${x.chapter_no}章：${x.summary}`).join("\n");
+          const sweep = await chatJSON<any>(env, [
+            { role: "system", content: await tpl(env, bookId, "consistency", PROMPT_CONSISTENCY) },
+            { role: "user", content: `【最近章节摘要】\n${sumText}\n\n【当前世界状态】\n${(st.memory || "").slice(0, 8000)}` },
+          ], { temperature: 0.1, maxTokens: 900 });
+          const issues: string[] = Array.isArray(sweep?.issues) ? sweep.issues.map(String) : [];
+          const patches: string[] = Array.isArray(sweep?.patch_directives) ? sweep.patch_directives.map(String) : [];
+          if (issues.length) await M.log(env, { bookId, chapterNo: ch, level: "warn", stage: "consistency", message: `巡检发现 ${issues.length} 处矛盾`, meta: { issues, patches } });
+          else await M.log(env, { bookId, chapterNo: ch, stage: "consistency", message: "连贯性巡检通过" });
+          patchDirectives.push(...patches.slice(0, 4).map((x) => `找补：${x}`));
+        } catch (e) {
+          await M.log(env, { bookId, chapterNo: ch, level: "warn", stage: "consistency", message: `巡检故障已跳过: ${String(e).slice(0, 100)}` });
+        }
       }
       const hero = (await M.loadCharacters(env, bookId)).find((x) => x.role === "protagonist");
       const heroLine = hero ? `${hero.name} ${hero.realm_name}${M.formatRealmSub(powerRanks, hero.realm_index, hero.realm_sub)}｜灵石${hero.assets?.spirit_stones ?? 0}` : "—";
@@ -345,7 +413,7 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
       // 每章体检四项：战斗/文戏占比、境界停滞、场景停滞、盟友(女主)长期缺席。
       // 发现问题生成写作指令存入 health_todo，下一章 extract 时注入主笔提示，用完即清。
       const health: any = (await M.getPlot(env, bookId, "__health")) || {};
-      const directives: string[] = [];
+      const directives: string[] = [...patchDirectives];
       const combatKw = ["灵力", "剑", "杀", "血", "阵", "符", "轰", "斩", "偷袭", "毒", "护体", "厮杀", "爆"];
       const combatHits = combatKw.reduce((a, k) => a + (body.includes(k) ? 1 : 0), 0);
       health.combat = [...(health.combat || []), combatHits >= 6 ? 1 : 0].slice(-10);
@@ -522,7 +590,7 @@ async function genOutline(env: Env, bookId: string, ch: number, volText: string,
   ], { temperature: 0.7, maxTokens: 2600 }); // 细纲含战斗阶段/支线等新字段，1600 会截断
 }
 
-async function genDraft(env: Env, bookId: string, ch: number, outline: ChapterOutline, memory: string, tail: string, c: ReturnType<typeof cfg>, sp: string, openings: string): Promise<string> {
+async function genDraft(env: Env, bookId: string, ch: number, outline: ChapterOutline, memory: string, tail: string, c: ReturnType<typeof cfg>, sp: string, openings: string, temperature = 0.85): Promise<string> {
   let memorySlim = memory;
   const prefixRegex = /\n【全书前情提要（已压缩，长程主线记忆）】[\s\S]*?(?=\n【当前位面】)/;
   if (prefixRegex.test(memory)) {
@@ -537,7 +605,7 @@ async function genDraft(env: Env, bookId: string, ch: number, outline: ChapterOu
         { CH: ch, CMIN: c.charsMin, CMAX: c.charsMax, TITLE: outline.title, OPENINGS: openings }) },
     { role: "user", content: fill("【本章细纲】\n{{OUTLINE}}\n\n【当前关键角色状态】\n{{MEMORY}}\n\n【上一章结尾】\n{{TAIL}}",
         { OUTLINE: JSON.stringify(outline), MEMORY: memorySlim, TAIL: tail }) },
-  ], { temperature: 0.85, maxTokens: 7000 });
+  ], { temperature, maxTokens: 7000 });
   return raw.text;
 }
 
