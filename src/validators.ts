@@ -2,7 +2,7 @@
 // 硬规则校验器 —— 不依赖 AI 自觉，用代码守住"战力/逻辑"红线。
 // 在更新记忆库前对 StateDelta 做断言；违规则打回重写。
 // ============================================================================
-import type { CharacterState, StateDelta, Foreshadow, Plane } from "./types";
+import type { CharacterState, StateDelta, Foreshadow, Plane, PowerRank } from "./types";
 
 export interface ValidationIssue {
   level: "block" | "warn";
@@ -243,6 +243,24 @@ export function detectLedgerLeaks(text: string): SlopReport {
     hit: hits.length > 0,
     reasons: hits.length ? [`正文报了灵石总余额(违反系统结算铁律): ${hits.slice(0, 3).join("、")}`] : [],
   };
+}
+
+// ---------- 境界叫法校验（纯代码，按本书境界体系动态生成规则） ----------
+// 层制境界(如练气1-9层)严禁叫"初期/中期/后期/巅峰"；四档制境界(筑基及以上)严禁叫"X层"。
+// 检出即触发润色修正，杜绝"练气初期"这类口径漂移。
+export function detectRealmMisnaming(text: string, ranks: PowerRank[]): SlopReport {
+  const reasons: string[] = [];
+  for (const r of ranks || []) {
+    if (!r?.name || r.subLayers === 1) continue;
+    if (r.subLayers === 4) {
+      const hits = text.match(new RegExp(`${r.name}\\s*[一二两三四五六七八九十\\d]+\\s*层`, "g"));
+      if (hits?.length) reasons.push(`「${r.name}」只分初期/中期/后期/巅峰，正文误用层数叫法: ${[...new Set(hits)].slice(0, 3).join("、")}`);
+    } else {
+      const hits = text.match(new RegExp(`${r.name}\\s*(?:期)?(?:初期|中期|后期|末期|巅峰)`, "g"));
+      if (hits?.length) reasons.push(`「${r.name}」只按层数称呼(一层到${r.subLayers}层)，正文误用: ${[...new Set(hits)].slice(0, 3).join("、")}`);
+    }
+  }
+  return { hit: reasons.length > 0, reasons };
 }
 
 export const hasBlocking = (issues: ValidationIssue[]) =>

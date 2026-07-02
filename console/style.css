@@ -34,13 +34,26 @@ button.danger { background: #dc2626; }
 .reader-bar { display: flex; gap: 8px; margin-bottom: 10px; }
 .reader pre { white-space: pre-wrap; line-height: 1.9; font-family: "Songti SC", "SimSun", serif; font-size: 15px; color: #e8ebf0; }
 table { width: 100%; border-collapse: collapse; font-size: 12px; }
-th, td { border: 1px solid #2a313d; padding: 6px 8px; text-align: left; }
-th { background: #1a1f29; }
+th, td { border: 1px solid #2a313d; padding: 6px 8px; text-align: left; white-space: nowrap; }
+th { background: #1a1f29; position: sticky; top: 0; z-index: 1; }
+tr:nth-child(even) td { background: #141822; }
+tr:hover td { background: #1a2130; }
+/* 表格横向滚动容器：窄屏/宽表不再挤成一团 */
+.tablewrap { overflow: auto; max-height: 60vh; border: 1px solid #262b36; border-radius: 8px; margin-bottom: 14px; background: #11141b; }
+.tablewrap table { font-size: 12.5px; }
+.tablewrap td input { padding: 4px 6px; font-size: 12px; border-radius: 4px; }
+.tablewrap td button { padding: 4px 10px; font-size: 12px; }
+/* 记忆库分区标题 */
+#tab-memory h4 { margin: 18px 0 8px; padding-left: 10px; border-left: 3px solid #3b82f6; font-size: 14px; color: #cdd6e4; }
+/* 剧情状态卡片化 */
+.plot-card { background: #161922; border: 1px solid #262b36; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
+.plot-card .pk { color: #6aa3ff; font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+.plot-card pre { margin: 0; white-space: pre-wrap; font-size: 12px; color: #b8c0cd; max-height: 200px; overflow: auto; line-height: 1.6; }
 dialog { background: #161922; color: #d8dde6; border: 1px solid #2c333f; border-radius: 10px; width: min(680px, 92vw); }
 dialog::backdrop { background: rgba(0,0,0,.6); }
 .log-error { color: #f06767; }
 .log-warn { color: #e0b341; }
-pre#plotView, pre#chapterText { white-space: pre-wrap; }
+pre#chapterText { white-space: pre-wrap; }
 
 /* ---- 新书向导 ---- */
 #wizard { width: min(760px, 94vw); }

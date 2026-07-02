@@ -176,6 +176,15 @@ async function main() {
   ok(leak1.hit === true, '报总余额("只剩三块灵石")被检出', leak1.reasons.join(''));
   ok(leak2.hit === false, '单笔收支表述不误伤');
 
+  // 境界叫法检测：层制境界(练气9层)禁"初中后巅峰"，四档制(筑基+)禁"X层"
+  const ranks = [{ index: 0, name: '练气', subLayers: 9 }, { index: 1, name: '筑基', subLayers: 4 }];
+  const rn1 = validators.detectRealmMisnaming('那老者已是练气后期修为，护卫不过练气三层。', ranks);
+  const rn2 = validators.detectRealmMisnaming('管事乃筑基三层的高手。', ranks);
+  const rn3 = validators.detectRealmMisnaming('他不过练气三层，对面却是筑基中期的老怪。', ranks);
+  ok(rn1.hit === true && rn1.reasons.join('').includes('练气'), '层制境界误用"练气后期"被检出', rn1.reasons.join(''));
+  ok(rn2.hit === true && rn2.reasons.join('').includes('筑基'), '四档境界误用"筑基三层"被检出', rn2.reasons.join(''));
+  ok(rn3.hit === false, '正确叫法(练气三层/筑基中期)不误伤');
+
   const moveNames = hero.movement_arts.map(m => m.name);
   ok(moveNames.includes('鬼魅步') && moveNames.includes('血遁'), '身法/神通随剧情累加且不丢失', `[${moveNames.join('、')}]`);
 

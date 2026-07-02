@@ -6,7 +6,7 @@ import type { Env, Book, ChapterOutline, StateDelta, Plane, PowerRank } from "./
 import { cfg, DEFAULT_PLANES, DEFAULT_POWER_RANKS } from "./config";
 import { chat, parseJson, chatJSON } from "./llm";
 import * as M from "./memory";
-import { validateDelta, hasBlocking, formatIssues, detectSlop, detectLedgerLeaks } from "./validators";
+import { validateDelta, hasBlocking, formatIssues, detectSlop, detectLedgerLeaks, detectRealmMisnaming } from "./validators";
 import {
   PROMPT_EXTRACT, PROMPT_OUTLINE, PROMPT_REVIEW, PROMPT_DRAFT, PROMPT_POLISH, PROMPT_UPDATE, PROMPT_DIGEST,
 } from "./prompts";
@@ -70,7 +70,10 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
   if (!book) throw new Error(`book not found: ${bookId}`);
   const ch = st.chapterNo;
   const vol = M.volumeForChapter(book, ch);
-  const volText = vol ? JSON.stringify(vol) : (book.master_outline || "（无卷纲，依据总纲推进）");
+  // 剧情坐标：告诉模型"现在写到全书哪一格"，配合卷界锁防止跳卷/抢跑
+  const volText = vol
+    ? `【当前剧情坐标】第${vol.vol}卷《${vol.title}》(第${vol.start_ch}-${vol.end_ch}章)｜本章是卷内第 ${ch - vol.start_ch + 1}/${vol.end_ch - vol.start_ch + 1} 章｜卷内进度约 ${Math.round(((ch - vol.start_ch + 1) / Math.max(1, vol.end_ch - vol.start_ch + 1)) * 100)}%\n${JSON.stringify(vol)}`
+    : (book.master_outline || "（无卷纲，依据总纲推进）");
   const stylePrefix = book.style_prompt_override
     ? `【本书特别文风/设定要求（优先级最高，与下列通用铁律冲突时以此为准）】\n${book.style_prompt_override}\n\n`
     : "";
@@ -147,10 +150,11 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
     case "polish": {
       const slop = detectSlop(st.draft!);
       const ledger = detectLedgerLeaks(st.draft!);
-      const needPolish = c.polishMode === "always" || (c.polishMode === "auto" && (slop.hit || ledger.hit || st.attempt > 0));
+      const realmNaming = detectRealmMisnaming(st.draft!, powerRanks);
+      const needPolish = c.polishMode === "always" || (c.polishMode === "auto" && (slop.hit || ledger.hit || realmNaming.hit || st.attempt > 0));
       let finalText = st.draft!;
       if (needPolish) {
-        const reasons = [...slop.reasons, ...ledger.reasons];
+        const reasons = [...slop.reasons, ...ledger.reasons, ...realmNaming.reasons];
         if (reasons.length) await M.log(env, { bookId, chapterNo: ch, stage: "polish", message: `触发润色: ${reasons.join("；")}` });
         finalText = await polish(env, bookId, ch, st.draft!, st.memory!, c, stylePrefix);
         // 润色后复检账本泄漏：仍有总余额表述则代码兜底改写成模糊表达，绝不让错误总数上架
@@ -262,7 +266,7 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
       const heroLine = hero ? `${hero.name} ${hero.realm_name}${M.formatRealmSub(powerRanks, hero.realm_index, hero.realm_sub)}｜灵石${hero.assets?.spirit_stones ?? 0}` : "—";
 
       // 章末结算单（代码生成的系统账）：存档喂给下一章当账目锚点，也发通知供人工核对
-      const settlement = settlementText(delta, hero, ch);
+      const settlement = settlementText(delta, hero, ch, outline.location);
       await M.setPlot(env, bookId, "last_settlement", settlement);
 
       const rewrites = st.attempt || 0;
@@ -510,9 +514,9 @@ async function applyDelta(env: Env, bookId: string, ch: number, d: StateDelta, b
   }
 }
 
-// 章末结算单：从本章状态增量里把主角的收获/消耗逐笔列出（纯代码，零算术风险），
-// 期末余额取应用增量后的面板实数。喂给下一章，让模型对"刚刚发生的账"零猜测。
-function settlementText(d: StateDelta, hero: import("./types").CharacterState | undefined, ch: number): string {
+// 章末结算单（游戏存档式）：收获/消耗逐笔 + 期末余额 + 当前坐标 + 主角近况伤势，
+// 全部纯代码生成零算术风险。喂给下一章，让模型对"刚刚发生的一切"零猜测。
+function settlementText(d: StateDelta, hero: import("./types").CharacterState | undefined, ch: number, location?: string): string {
   const cu = hero ? d.characters.find((x) => x.name === hero.name) : undefined;
   const gains: string[] = [];
   const costs: string[] = [];
@@ -532,7 +536,9 @@ function settlementText(d: StateDelta, hero: import("./types").CharacterState | 
     for (const mv of cu.add_movement_arts || []) gains.push(`神通/身法「${mv.name}」`);
   }
   const bal = hero ? `期末灵石=${hero.assets?.spirit_stones ?? 0}块` : "";
-  return `第${ch}章系统结算｜收获：${gains.join("、") || "无"}｜消耗：${costs.join("、") || "无"}｜${bal}`;
+  const coord = location ? `｜坐标：${location}` : "";
+  const status = hero?.status_notes ? `｜主角近况：${hero.status_notes.slice(0, 80)}` : "";
+  return `第${ch}章系统结算｜收获：${gains.join("、") || "无"}｜消耗：${costs.join("、") || "无"}｜${bal}${coord}${status}`;
 }
 
 function stripLeadingTitle(t: string): string {

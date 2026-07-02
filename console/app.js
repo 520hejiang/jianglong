@@ -402,7 +402,7 @@ async function loadMemory() {
     ? `当前位面：<b>${esc(book.current_plane||planes[0].name)}</b>　｜　位面表：${planes.map(p=>`${esc(p.name)}(序${p.min_realm}-${p.max_realm})`).join("、")}`
     : "（本书未设位面）";
 
-  document.getElementById("charList").innerHTML = `<table>
+  document.getElementById("charList").innerHTML = `<div class="tablewrap"><table>
     <tr><th>名</th><th>身份</th><th>存活</th><th>境界序</th><th>境界名</th><th>层</th><th>灵石</th><th>身法/神通</th><th>法宝</th><th>家底</th><th>近况</th><th></th></tr>
     ${chars.map((c) => {
       const assets = pj(c.assets, {spirit_stones:0,pills:[],materials:[],misc:[]});
@@ -422,21 +422,35 @@ async function loadMemory() {
       <td><input style="width:160px" id="sn_${c.id}" value="${esc(c.status_notes||"")}"></td>
       <td><button onclick="saveChar('${c.id}')">存</button></td>
     </tr>`;}).join("")}
-  </table>`;
-  document.getElementById("foreList").innerHTML = `<table>
+  </table></div>`;
+  document.getElementById("foreList").innerHTML = `<div class="tablewrap"><table>
     <tr><th>状态</th><th>重要</th><th>埋/建议回收</th><th>标题</th></tr>
     ${fores.map((f)=>`<tr><td>${f.status}</td><td>${f.importance}</td><td>${f.planted_ch}/${f.due_ch}</td><td>${esc(f.title)}</td></tr>`).join("")}
-  </table>`;
+  </table></div>`;
   const kindNames = { faction:"势力", location:"地点", artifact:"神器", technique:"神通", event:"事件", worldrule:"规则" };
-  document.getElementById("loreList").innerHTML = lore.length ? `<table>
+  document.getElementById("loreList").innerHTML = lore.length ? `<div class="tablewrap"><table>
     <tr><th>类</th><th>名</th><th>首见/近见</th><th>重要</th><th>状态</th><th>详情</th></tr>
-    ${lore.map((l)=>`<tr><td>${kindNames[l.kind]||l.kind}</td><td>${esc(l.name)}</td><td>${l.first_ch}/${l.last_ch}</td><td>${l.importance}</td><td>${esc(l.status||"")}</td><td class="hint" title="${esc(l.detail||"")}">${esc((l.detail||"").slice(0,60))}</td></tr>`).join("")}
-  </table>` : "<p class='hint'>（暂无设定卡，随章节生成自动积累）</p>";
-  document.getElementById("graphList").innerHTML = graph.length ? `<table>
+    ${lore.map((l)=>`<tr><td>${kindNames[l.kind]||l.kind}</td><td>${esc(l.name)}</td><td>${l.first_ch}/${l.last_ch}</td><td>${l.importance}</td><td>${esc(l.status||"")}</td><td class="hint" style="white-space:normal;min-width:260px" title="${esc(l.detail||"")}">${esc((l.detail||"").slice(0,80))}</td></tr>`).join("")}
+  </table></div>` : "<p class='hint'>（暂无设定卡，随章节生成自动积累）</p>";
+  document.getElementById("graphList").innerHTML = graph.length ? `<div class="tablewrap"><table>
     <tr><th>起点</th><th>关系</th><th>终点</th><th>更新章</th><th>备注</th></tr>
     ${graph.map((e)=>`<tr><td>${esc(e.src)}</td><td>→ ${esc(e.rel)} →</td><td>${esc(e.dst)}</td><td>${e.updated_ch}</td><td class="hint">${esc(e.note||"")}</td></tr>`).join("")}
-  </table>` : "<p class='hint'>（暂无关系边，随章节生成自动积累）</p>";
-  document.getElementById("plotView").textContent = plot.map((p)=>`${p.key}: ${p.value}`).join("\n");
+  </table></div>` : "<p class='hint'>（暂无关系边，随章节生成自动积累）</p>";
+  // 剧情状态卡片化：内部存档键翻译成人话，JSON 美化展示
+  const keyNames = {
+    main_node: "📍 主线进度", story_digest: "📜 全书前情提要", explored_map: "🗺 已探索地图/势力",
+    open_threads: "🧵 未了结线索", last_settlement: "🧾 上一章系统结算", __genjob: "⚙️ 生成任务存档(内部)",
+    __rewritejob: "⚙️ 重写任务存档(内部)", __char_seed: "🌱 初始角色快照(内部)",
+  };
+  const fmtVal = (v) => {
+    try { const o = typeof v === "string" ? JSON.parse(v) : v;
+      return typeof o === "string" ? o : JSON.stringify(o, null, 2); } catch { return String(v ?? ""); }
+  };
+  const plotSorted = [...plot].sort((a, b) => (a.key.startsWith("__") ? 1 : 0) - (b.key.startsWith("__") ? 1 : 0));
+  document.getElementById("plotView").innerHTML = plotSorted.map((p) => {
+    const name = keyNames[p.key] || (p.key.startsWith("volume_archive_") ? `🗂 卷宗归档·第${p.key.replace("volume_archive_","")}卷` : p.key);
+    return `<div class="plot-card"><div class="pk">${esc(name)}</div><pre>${esc(fmtVal(p.value))}</pre></div>`;
+  }).join("") || "<p class='hint'>（暂无剧情状态）</p>";
 }
 // 老书升级：把已有章节的标签回填进倒排索引（新章节自动索引，只需点一次）
 async function reindexBook() {
