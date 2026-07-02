@@ -216,6 +216,19 @@ export function detectSlop(text: string): SlopReport {
   return { hit: reasons.length > 0, reasons };
 }
 
+// ---------- 账本泄漏检测（纯代码） ----------
+// 正文里严禁出现"还剩/只剩/共X块灵石"这类总余额表述——总账归系统面板管，
+// AI 报总数必错。检出即触发润色删除（润色模板里有对应指令）。
+const LEDGER_LEAK = /(还剩|只剩|仅剩|尚余|共有|一共|总共|全部家当)[^。！？\n]{0,12}?[\d一二两三四五六七八九十百千]+\s*[块枚颗粒]\s*[下中上极品]{0,2}\s*灵[石晶]/g;
+
+export function detectLedgerLeaks(text: string): SlopReport {
+  const hits = text.match(LEDGER_LEAK) || [];
+  return {
+    hit: hits.length > 0,
+    reasons: hits.length ? [`正文报了灵石总余额(违反系统结算铁律): ${hits.slice(0, 3).join("、")}`] : [],
+  };
+}
+
 export const hasBlocking = (issues: ValidationIssue[]) =>
   issues.some((i) => i.level === "block");
 

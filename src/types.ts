@@ -178,7 +178,9 @@ export interface StateDelta {
     add_techniques?: { name: string; layer: number; maxLayer: number }[];
     add_movement_arts?: { name: string; kind: string; grade?: string; note?: string }[]; // 本章新习得的身法/神通/秘术
     add_artifacts?: { name: string; grade: string; durability: number; note?: string }[];
-    // 家底增量：灵石净变化（正得负耗），丹药/材料的增减
+    // 家底增量：灵石逐笔流水（收入正/支出负，代码求和记账——绝不让模型自己合计）
+    stone_moves?: { amount: number; note?: string }[];
+    // 兼容字段：模型若只给净变化也接受（旧格式），有 stone_moves 时以流水求和为准
     spirit_stones_delta?: number;
     add_pills?: { name: string; count: number }[];
     add_materials?: { name: string; count: number }[];

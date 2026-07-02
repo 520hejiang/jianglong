@@ -71,7 +71,10 @@ function makeDraft(ch) {
 }
 function makeDelta(ch) {
   const cu = { name: '陆长安', status_notes: `第${ch}章后，蛰伏暗处，警觉异常。` };
-  cu.spirit_stones_delta = spiritDelta(ch);
+  // 混用两种记账格式：偶数章走流水制(代码求和)，奇数章走旧净值制(兼容)；ch=7 拆成两笔验证求和
+  if (ch === 7) cu.stone_moves = [{ amount: 10, note: '缴获' }, { amount: -4, note: '买丹' }]; // 净+6=spiritDelta(7)
+  else if (ch % 2 === 0) cu.stone_moves = [{ amount: spiritDelta(ch), note: '单笔' }];
+  else cu.spirit_stones_delta = spiritDelta(ch);
   if (ch % 5 === 0) cu.status_notes += ' 缴获散修储物袋。';
   if (ch === 6) { Object.assign(cu, { realm_index: 1, realm_name: '筑基', realm_sub: 1, breakthrough: true }); cu.status_notes += ' 强行突破筑基。'; }
   else if (ch === 26) { Object.assign(cu, { realm_index: 2, realm_name: '结丹', realm_sub: 1, breakthrough: true }); cu.status_notes += ' 结成紫金丹。'; }
@@ -158,9 +161,16 @@ async function main() {
   ok(hero.realm_index === 2 && hero.realm_name === '结丹', '主角境界 练气→筑基→结丹', `序${hero.realm_index} ${hero.realm_name}`);
   ok(hero.last_breakthrough_ch === 26, '突破章号正确记录', `last_breakthrough_ch=${hero.last_breakthrough_ch}`);
 
-  // 灵石账目：起始 8 + 各章净变化
-  let expStones = 8; for (let ch = 1; ch <= N; ch++) expStones += spiritDelta(ch);
-  ok(hero.assets.spirit_stones === expStones, '灵石账目逐章自洽', `账面 ${hero.assets.spirit_stones} / 期望 ${expStones}`);
+  // 灵石账目：起始值 + 各章净变化（混用流水制与净值制，验证代码求和记账）
+  const seedStones = book.characters.find(c => c.role === 'protagonist').assets.spirit_stones;
+  let expStones = seedStones; for (let ch = 1; ch <= N; ch++) expStones += spiritDelta(ch);
+  ok(hero.assets.spirit_stones === expStones, '灵石账目逐章自洽(流水由代码求和)', `账面 ${hero.assets.spirit_stones} / 期望 ${expStones}`);
+
+  // 账本泄漏检测：正文报总余额必须被抓，单笔流水不误伤
+  const leak1 = validators.detectLedgerLeaks('他数了数，全部家当只剩三块下品灵石，心里发苦。');
+  const leak2 = validators.detectLedgerLeaks('他摸出两块灵石拍在案上，又缴获七块下品灵石。');
+  ok(leak1.hit === true, '报总余额("只剩三块灵石")被检出', leak1.reasons.join(''));
+  ok(leak2.hit === false, '单笔收支表述不误伤');
 
   const moveNames = hero.movement_arts.map(m => m.name);
   ok(moveNames.includes('鬼魅步') && moveNames.includes('血遁'), '身法/神通随剧情累加且不丢失', `[${moveNames.join('、')}]`);

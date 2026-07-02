@@ -6,7 +6,7 @@ import type { Env, Book, ChapterOutline, StateDelta, Plane, PowerRank } from "./
 import { cfg, DEFAULT_PLANES, DEFAULT_POWER_RANKS } from "./config";
 import { chat, parseJson, chatJSON } from "./llm";
 import * as M from "./memory";
-import { validateDelta, hasBlocking, formatIssues, detectSlop } from "./validators";
+import { validateDelta, hasBlocking, formatIssues, detectSlop, detectLedgerLeaks } from "./validators";
 import {
   PROMPT_EXTRACT, PROMPT_OUTLINE, PROMPT_REVIEW, PROMPT_DRAFT, PROMPT_POLISH, PROMPT_UPDATE, PROMPT_DIGEST,
 } from "./prompts";
@@ -145,11 +145,21 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
     }
     case "polish": {
       const slop = detectSlop(st.draft!);
-      const needPolish = c.polishMode === "always" || (c.polishMode === "auto" && (slop.hit || st.attempt > 0));
+      const ledger = detectLedgerLeaks(st.draft!);
+      const needPolish = c.polishMode === "always" || (c.polishMode === "auto" && (slop.hit || ledger.hit || st.attempt > 0));
       let finalText = st.draft!;
       if (needPolish) {
-        if (slop.hit) await M.log(env, { bookId, chapterNo: ch, stage: "polish", message: `触发润色去AI味: ${slop.reasons.join("；")}` });
+        const reasons = [...slop.reasons, ...ledger.reasons];
+        if (reasons.length) await M.log(env, { bookId, chapterNo: ch, stage: "polish", message: `触发润色: ${reasons.join("；")}` });
         finalText = await polish(env, bookId, ch, st.draft!, st.memory!, c, stylePrefix);
+        // 润色后复检账本泄漏：仍有总余额表述则代码兜底改写成模糊表达，绝不让错误总数上架
+        const recheck = detectLedgerLeaks(finalText);
+        if (recheck.hit) {
+          finalText = finalText.replace(
+            /(还剩|只剩|仅剩|尚余|共有|一共|总共|全部家当)[^。！？\n]{0,12}?[\d一二两三四五六七八九十百千]+\s*[块枚颗粒]\s*[下中上极品]{0,2}\s*灵[石晶]/g,
+            "摸了摸干瘪的钱袋");
+          await M.log(env, { bookId, chapterNo: ch, level: "warn", stage: "polish", message: "润色后仍报灵石总余额，已代码兜底改写为模糊表述" });
+        }
       }
       return { ...st, stage: "update", finalText };
     }
@@ -425,6 +435,13 @@ async function extractDelta(env: Env, bookId: string, ch: number, text: string, 
   d.characters ??= []; d.foreshadow_new ??= []; d.foreshadow_update ??= [];
   d.lore ??= []; d.edges ??= [];
   d.plot ??= {}; d.tags ??= []; d.summary ??= "";
+  // 【代码记账】灵石流水由代码求和，覆盖模型自己合计的净值——AI 不会算数，算数归代码
+  for (const cu of d.characters) {
+    if (Array.isArray(cu.stone_moves) && cu.stone_moves.length) {
+      cu.spirit_stones_delta = cu.stone_moves.reduce(
+        (acc, m) => acc + (typeof m?.amount === "number" && Number.isFinite(m.amount) ? Math.trunc(m.amount) : 0), 0);
+    }
+  }
   return d;
 }
 
