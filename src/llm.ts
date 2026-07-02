@@ -114,17 +114,56 @@ export function parseJson<T>(raw: string): T {
   try {
     return JSON.parse(s) as T;
   } catch {
-    // 容错二次尝试：去尾逗号、全角引号转半角、中文逗号误用、补缺失的数组/对象间逗号
-    let f = s
+    // 容错二次尝试：去尾逗号、全角引号转半角、补缺失的数组/对象间逗号
+    const f = s
       .replace(/,\s*([}\]])/g, "$1")            // 尾逗号
       .replace(/[“”]/g, '"').replace(/[‘’]/g, "'") // 智能引号
       .replace(/"\s*\n\s*"/g, '",\n"')          // 相邻字符串漏逗号（"a"\n"b" -> "a",\n"b"）
       .replace(/"\s+"/g, '", "');               // 同行相邻字符串漏逗号（"a" "b"）
-    return JSON.parse(f) as T;
+    try {
+      return JSON.parse(f) as T;
+    } catch {
+      // 终极修复：补值后漏逗号 + 转义字符串内部的裸英文双引号（mimo 高频翻车点）
+      return JSON.parse(repairJson(f)) as T;
+    }
   }
 }
 
-// 调 LLM 并要求 JSON；解析失败自动重试（降温重来），抵御模型偶发的格式不规范。
+// 深度修复常见的 LLM JSON 语法伤：
+//   1) 值结尾（"、}、]、数字、true/false/null）换行后直接跟下一个 "key" 却漏了逗号
+//   2) 字符串值内部出现未转义的英文双引号（如 detail:"他说"滚""）——用状态机判定该引号
+//      是否真的在收尾（后面跟 , } ] : 或换行才算收尾），否则转义之
+function repairJson(s: string): string {
+  const commaFixed = s.replace(/(["}\]0-9el])[ \t]*\n(\s*")/g, "$1,\n$2");
+  let out = "";
+  let inStr = false;
+  for (let i = 0; i < commaFixed.length; i++) {
+    const c = commaFixed[i];
+    if (!inStr) {
+      if (c === '"') inStr = true;
+      out += c;
+      continue;
+    }
+    if (c === "\\") { out += c + (commaFixed[i + 1] ?? ""); i++; continue; }
+    if (c === '"') {
+      let j = i + 1;
+      while (j < commaFixed.length && (commaFixed[j] === " " || commaFixed[j] === "\t" || commaFixed[j] === "\r")) j++;
+      const nxt = commaFixed[j];
+      if (nxt === undefined || nxt === "," || nxt === "}" || nxt === "]" || nxt === ":" || nxt === "\n") {
+        inStr = false; out += c;       // 合法收尾引号
+      } else {
+        out += '\\"';                  // 字符串内部的裸引号，转义保内容
+      }
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
+// 调 LLM 并要求 JSON；解析失败自动重试。重试时：
+//   1) 降温提高规范性；2) 把上次的坏输出和报错回喂给模型，让它知道错在哪；
+//   3) 每次把 maxTokens 提高 50%——大量解析失败其实是 JSON 写到一半被截断。
 export async function chatJSON<T>(
   env: Env,
   messages: ChatMsg[],
@@ -132,16 +171,27 @@ export async function chatJSON<T>(
   tries = 3
 ): Promise<T> {
   let lastErr: unknown;
+  let lastRaw = "";
+  let maxTokens = opts.maxTokens;
   for (let i = 0; i < tries; i++) {
-    const r = await chat(env, messages, {
-      temperature: i === 0 ? (opts.temperature ?? 0.5) : 0.15, // 重试时降温，提高 JSON 规范性
-      maxTokens: opts.maxTokens,
+    const msgs: ChatMsg[] = i === 0 || !lastRaw ? messages : [
+      ...messages,
+      { role: "assistant", content: lastRaw.slice(0, 6000) },
+      { role: "user", content: `你上面输出的 JSON 解析失败：${String(lastErr).slice(0, 200)}。请重新输出一份完整、合法的 JSON，规则：字符串值内部一律用中文引号「」，绝不出现未转义的英文双引号；所有括号必须闭合、逗号必须完整；除 JSON 本身外不要输出任何文字。` },
+    ];
+    const r = await chat(env, msgs, {
+      temperature: i === 0 ? (opts.temperature ?? 0.5) : 0.15,
+      maxTokens,
       json: true,
     });
     try { return parseJson<T>(r.text); }
-    catch (e) { lastErr = e; }
+    catch (e) {
+      lastErr = e; lastRaw = r.text;
+      if (maxTokens) maxTokens = Math.ceil(maxTokens * 1.5); // 防截断：逐次放宽输出上限
+    }
   }
-  throw new Error(`JSON 解析失败(已重试${tries}次): ${String(lastErr)}`);
+  const snippet = lastRaw ? `｜模型原始输出首尾: ${lastRaw.slice(0, 160)} …… ${lastRaw.slice(-160)}` : "";
+  throw new Error(`JSON 解析失败(已重试${tries}次): ${String(lastErr)}${snippet}`);
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

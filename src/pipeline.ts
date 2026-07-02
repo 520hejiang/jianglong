@@ -129,7 +129,7 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
           { role: "system", content: stylePrefix + fill(await tpl(env, bookId, "review", PROMPT_REVIEW), { CH: ch }) },
           { role: "user", content: fill("【待审细纲】\n{{OUTLINE}}\n\n【当前世界状态】\n{{MEMORY}}\n\n【超期伏笔提醒】\n{{OVERDUE}}",
               { OUTLINE: JSON.stringify(outline), MEMORY: st.memory!, OVERDUE: overdue }) },
-        ], { temperature: 0.3, maxTokens: 2000, json: true });
+        ], { temperature: 0.3, maxTokens: 2800, json: true }); // revised_outline 是完整细纲，上限要够
         let review: any;
         try { review = parseJson(reviewRaw.text); } catch { break; }
         if (review.approved) break;
@@ -387,7 +387,7 @@ async function genOutline(env: Env, bookId: string, ch: number, volText: string,
     { role: "system", content: sp + fill(await tpl(env, bookId, "outline", PROMPT_OUTLINE), { CH: ch, CMIN: c.charsMin, CMAX: c.charsMax }) },
     { role: "user", content: fill("【本章焦点】\n{{FOCUS}}\n\n【本卷大纲】\n{{VOLUME}}\n\n【当前世界状态】\n{{MEMORY}}",
         { FOCUS: focus, VOLUME: volText, MEMORY: memory }) },
-  ], { temperature: 0.7, maxTokens: 1600 });
+  ], { temperature: 0.7, maxTokens: 2600 }); // 细纲含战斗阶段/支线等新字段，1600 会截断
 }
 
 async function genDraft(env: Env, bookId: string, ch: number, outline: ChapterOutline, memory: string, tail: string, c: ReturnType<typeof cfg>, sp: string, openings: string): Promise<string> {
@@ -421,7 +421,7 @@ async function extractDelta(env: Env, bookId: string, ch: number, text: string, 
   const d = await chatJSON<StateDelta>(env, [
     { role: "system", content: sp + fill(await tpl(env, bookId, "update", PROMPT_UPDATE), { CH: ch }) },
     { role: "user", content: fill("【本章定稿】\n{{TEXT}}\n\n【当前世界状态】\n{{MEMORY}}", { TEXT: text, MEMORY: memory }) },
-  ], { temperature: 0.2, maxTokens: 2000 });
+  ], { temperature: 0.2, maxTokens: 3000 }); // 状态增量含设定卡/图谱/人物演化，2000 会截断
   d.characters ??= []; d.foreshadow_new ??= []; d.foreshadow_update ??= [];
   d.lore ??= []; d.edges ??= [];
   d.plot ??= {}; d.tags ??= []; d.summary ??= "";
