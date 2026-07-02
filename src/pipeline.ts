@@ -2,8 +2,8 @@
 // 多 Agent 流水线：读取记忆 -> 提取焦点 -> 细纲 -> 审核 -> 正文 -> 润色质检 -> 更新记忆
 // 一次 generateChapter 完整产出并落库一章。
 // ============================================================================
-import type { Env, Book, ChapterOutline, StateDelta, Plane } from "./types";
-import { cfg, DEFAULT_PLANES } from "./config";
+import type { Env, Book, ChapterOutline, StateDelta, Plane, PowerRank } from "./types";
+import { cfg, DEFAULT_PLANES, DEFAULT_POWER_RANKS } from "./config";
 import { chat, parseJson, chatJSON } from "./llm";
 import * as M from "./memory";
 import { validateDelta, hasBlocking, formatIssues, detectSlop } from "./validators";
@@ -79,6 +79,7 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
   const fores = await M.openForeshadowing(env, bookId);
   const planes: Plane[] = book.planes ? safeParse<Plane[]>(book.planes, []) : DEFAULT_PLANES;
   const currentPlane = book.current_plane || planes[0]?.name || null;
+  const powerRanks: PowerRank[] = book.power_system ? safeParse<PowerRank[]>(book.power_system, DEFAULT_POWER_RANKS) : DEFAULT_POWER_RANKS;
 
   switch (st.stage) {
     case "extract": {
@@ -90,7 +91,7 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
       const events = await M.recentEvents(env, bookId, 8);
       const baseMem = M.compileMemoryContext({
         chars, fores, mainNode, exploredMap, relevant: [], currentPlane, storyDigest,
-        events, recentSums,
+        events, recentSums, powerRanks,
         lastSummary: last?.summary || "", lastTail: last?.ending_tail || "",
       });
       const extractRaw = await chat(env, [
@@ -108,7 +109,7 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
       const edges = await M.edgesFor(env, bookId, entities, 20);
       const memory = M.compileMemoryContext({
         chars, fores, mainNode, exploredMap, relevant, currentPlane, storyDigest,
-        lore, edges, events, recentSums,
+        lore, edges, events, recentSums, powerRanks,
         lastSummary: last?.summary || "", lastTail: last?.ending_tail || "",
       });
       const ops = await M.recentOpenings(env, bookId, 5);
@@ -247,7 +248,7 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
         });
       }
       const hero = (await M.loadCharacters(env, bookId)).find((x) => x.role === "protagonist");
-      const heroLine = hero ? `${hero.name} ${hero.realm_name}${hero.realm_sub}层｜灵石${hero.assets?.spirit_stones ?? 0}` : "—";
+      const heroLine = hero ? `${hero.name} ${hero.realm_name}${M.formatRealmSub(powerRanks, hero.realm_index, hero.realm_sub)}｜灵石${hero.assets?.spirit_stones ?? 0}` : "—";
       const rewrites = st.attempt || 0;
       const qc = issuesText.length ? `\n质检: ${issuesText.join("；").slice(0, 300)}` : "";
       await tg(env, `📖 <b>${book.title}</b> 第${ch}章 ${title}（${wc}字｜重写${rewrites}次）\n摘要: ${delta.summary || "—"}\n主角: ${heroLine}${qc}`);

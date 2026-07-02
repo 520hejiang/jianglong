@@ -6,7 +6,7 @@
 // ============================================================================
 import type {
   Env, Book, CharacterState, Foreshadow, StateDelta, Volume, Assets,
-  LoreEntry, LoreKind, GraphEdge,
+  LoreEntry, LoreKind, GraphEdge, PowerRank,
 } from "./types";
 import { emptyAssets } from "./types";
 
@@ -329,6 +329,22 @@ export async function releaseLock(env: Env, bookId: string) {
   await env.KV.delete(`genlock:${bookId}`);
 }
 
+// ---------------- 境界显示 ----------------
+// 大境界只分四档时(subLayers=4)用"初期/中期/后期/巅峰"，其余用"N层"（如练气九层）。
+const STAGE4 = ["初期", "中期", "后期", "巅峰"];
+export function formatRealmSub(ranks: PowerRank[] | undefined, realmIndex: number, sub: number): string {
+  const rank = ranks?.find((r) => r.index === realmIndex);
+  if (rank && rank.subLayers === 4) return STAGE4[Math.min(4, Math.max(1, sub)) - 1];
+  if (rank && rank.subLayers === 1) return "";
+  return `${sub}层`;
+}
+export function realmLadderText(ranks: PowerRank[] | undefined): string {
+  if (!ranks?.length) return "";
+  return ranks.map((r) =>
+    `${r.name}(${r.subLayers === 4 ? "初/中/后/巅峰" : r.subLayers === 1 ? "唯一" : `1-${r.subLayers}层`})`
+  ).join(" → ");
+}
+
 // ---------------- 上下文编译：分层记忆 ----------------
 // 🛡️【核心防遗忘修复】：新增获取近期关键配角与地点的辅助函数（防止大模型在500万字后把同一个人名字记混）
 function compileRecentSceneContext(chars: CharacterState[], relevant: { chapter_no: number; summary: string }[]): string {
@@ -366,7 +382,9 @@ export function compileMemoryContext(p: {
   edges?: GraphEdge[];                                   // 本章相关关系网（知识图谱一跳邻居）
   events?: LoreEntry[];                                  // 近期大事记（时间线）
   recentSums?: { chapter_no: number; summary: string }[]; // 最近10章摘要（滚动短期记忆）
+  powerRanks?: PowerRank[];                              // 本书境界体系（决定境界叫法：N层 或 初/中/后/巅峰）
 }): string {
+  const realmOf = (c: CharacterState) => `${c.realm_name}${formatRealmSub(p.powerRanks, c.realm_index, c.realm_sub)}`;
   // 截断函数：法宝、功法、丹药等永远只列前 15 个，防止上下文被堆爆
   const truncateList = (arr: any[], label: string): string => {
     if (!arr || arr.length === 0) return '无';
@@ -386,7 +404,7 @@ export function compileMemoryContext(p: {
         c.goals && `目标:${c.goals}`,
         c.secrets && `秘密:${c.secrets}`,
       ].filter(Boolean).join("｜");
-      return `- ${c.name}${c.aliases.length ? `(${c.aliases.join("/")})` : ""}｜${c.role}｜${c.alive ? "在世" : "已死"}｜境界:${c.realm_name}${c.realm_sub}层｜功法:${truncateList(c.techniques, '功法')}｜近况:${c.status_notes || "—"}${persona ? `｜${persona}` : ""}`;
+      return `- ${c.name}${c.aliases.length ? `(${c.aliases.join("/")})` : ""}｜${c.role}｜${c.alive ? "在世" : "已死"}｜境界:${realmOf(c)}｜功法:${truncateList(c.techniques, '功法')}｜近况:${c.status_notes || "—"}${persona ? `｜${persona}` : ""}`;
     }).join("\n");
 
   // 主角家底单列，同样做“前15种”防膨胀
@@ -411,7 +429,8 @@ export function compileMemoryContext(p: {
 
   // 🛡️【核心防遗忘修复】：植入近期配角、近期地点、时间线进度，防大模型逻辑混淆
   const sceneContext = compileRecentSceneContext(p.chars, p.relevant);
-  const progression = `【当前时间线】\n主角上次大境界突破于第 ${hero?.last_breakthrough_ch || 0} 章，当前处于 ${p.currentPlane || '凡界'}，主角境界 ${hero?.realm_name || '凡人'} 第 ${hero?.realm_sub || 0} 层`;
+  const progression = `【当前时间线】\n主角上次大境界突破于第 ${hero?.last_breakthrough_ch || 0} 章，当前处于 ${p.currentPlane || '凡界'}，主角境界 ${hero ? realmOf(hero) : '凡人'}`;
+  const ladder = realmLadderText(p.powerRanks);
 
   // 设定卡：势力/神器/神通/地点/世界规则（按相关度检索出的本章会用到的卡）
   const kindLabel: Record<string, string> = {
@@ -439,6 +458,7 @@ export function compileMemoryContext(p: {
 
   return [
     `【全书前情提要（已压缩，长程主线记忆）】\n${p.storyDigest || "（暂无，靠前章节）"}`,
+    ladder ? `【境界体系（叫法硬口径：标"初/中/后/巅峰"的境界绝不用"N层"称呼，反之亦然）】\n${ladder}` : "",
     `【当前位面】${p.currentPlane || "（未设/凡界）"}`,
     `【主线进度】\n${p.mainNode ? JSON.stringify(p.mainNode) : "（起始）"}`,
     `【已探索地图/势力（近40）】\n${map40.join("、") || "（无）"}`,

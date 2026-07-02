@@ -67,6 +67,7 @@ async function loadBooks() {
         <button onclick="startBook('${b.id}')">▶ 开始</button>
         <button onclick="stopBook('${b.id}')">⏸ 暂停</button>
         <button onclick="genOne('${b.id}')">⚡ 立即生成一章</button>
+        <button onclick="openEdit('${b.id}')">📝 编辑设定</button>
         <button class="danger" onclick="resetBook('${b.id}')">🔧 重置生成</button>
         <button class="danger" onclick="wipeBook('${b.id}')">🧨 清空重置</button>
         <button class="danger" onclick="deleteBook('${b.id}')">☠️ 彻底删书</button>
@@ -113,6 +114,42 @@ async function deleteBook(id) {
     alert(`☠️ 已彻底删除《${r.deleted || title}》，数据库不留痕迹。`);
     loadBooks();
   } catch (e) { alert("删除失败：" + e); }
+}
+
+// 编辑正在写的书的设定：大纲/设定集/分卷/境界体系/文风，保存后下一章生成即生效
+let _editId = null;
+async function openEdit(id) {
+  try {
+    const b = await call(`/api/books/${id}`);
+    _editId = id;
+    const fmt = (v) => { try { return JSON.stringify(typeof v === "string" ? JSON.parse(v) : v, null, 2); } catch { return v || ""; } };
+    document.getElementById("ed_master").value = b.master_outline || "";
+    document.getElementById("ed_settings").value = b.core_settings || "";
+    document.getElementById("ed_vols").value = fmt(b.volume_outline);
+    document.getElementById("ed_power").value = fmt(b.power_system);
+    document.getElementById("ed_style").value = b.style_prompt_override || "";
+    document.getElementById("ed_target").value = b.target_chapters || 800;
+    document.getElementById("editDlg").showModal();
+  } catch (e) { alert("读取失败：" + e); }
+}
+async function saveEdit() {
+  if (!_editId) return;
+  let vols, power;
+  try { vols = JSON.parse(document.getElementById("ed_vols").value); } catch (e) { return alert("「分卷大纲」不是合法 JSON：" + e); }
+  try { power = JSON.parse(document.getElementById("ed_power").value); } catch (e) { return alert("「境界体系」不是合法 JSON：" + e); }
+  try {
+    await call(`/api/books/${_editId}`, { method: "PUT", body: JSON.stringify({
+      master_outline: document.getElementById("ed_master").value,
+      core_settings: document.getElementById("ed_settings").value,
+      volume_outline: vols,
+      power_system: power,
+      style_prompt_override: document.getElementById("ed_style").value,
+      target_chapters: +document.getElementById("ed_target").value || 800,
+    }) });
+    document.getElementById("editDlg").close();
+    alert("✅ 设定已保存，下一章生成即按新设定执行");
+    loadBooks();
+  } catch (e) { alert("保存失败：" + e); }
 }
 
 // 一键导入完整大纲 JSON（手机首选：含文风/位面/角色，无需电脑跑脚本）

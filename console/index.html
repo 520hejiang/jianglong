@@ -44,6 +44,22 @@
         </div>
       </dialog>
 
+      <!-- ===================== 编辑设定（改在写的书） ===================== -->
+      <dialog id="editDlg">
+        <h3>📝 编辑本书设定</h3>
+        <p class="hint">直接修改正在写的书的大纲/设定/境界体系，保存后下一章生成即生效。分卷大纲与境界体系必须是合法 JSON。</p>
+        <label>总纲<textarea id="ed_master" rows="4"></textarea></label>
+        <label>核心设定集<textarea id="ed_settings" rows="6"></textarea></label>
+        <label>分卷大纲 JSON<textarea id="ed_vols" rows="8" style="font-family:monospace;font-size:12px"></textarea></label>
+        <label>境界体系 JSON<textarea id="ed_power" rows="3" style="font-family:monospace;font-size:12px"></textarea></label>
+        <label>本书文风（style_prompt_override）<textarea id="ed_style" rows="4"></textarea></label>
+        <label>目标章数 <input id="ed_target" type="number" style="width:100px"></label>
+        <div class="row" style="margin-top:8px">
+          <button onclick="saveEdit()">💾 保存设定</button>
+          <button onclick="document.getElementById('editDlg').close()">取消</button>
+        </div>
+      </dialog>
+
       <!-- ===================== 新书向导 ===================== -->
       <dialog id="wizard">
         <div class="wiz-head">
