@@ -359,7 +359,7 @@ async function rewriteStep(env: Env, bookId: string, st: GenState): Promise<GenS
     { role: "system", content: `你是一位纯正的人类网文作家。请把【初稿】里的“AI腔、生硬的词汇、模板化的套路”全部磨掉，换成中文人类的口语化表达、真实的动作细节和内心戏。
 【关键底线】严禁使用：仿佛、不禁、瞬间、竟然、居然、与此同时、不仅...而且、首先/其次。禁止替换原文的专有名词、人物名字、境界等级和灵石数量，只改文笔！` },
     { role: "user", content: `【初稿】\n${ex.content}` }
-  ], { temperature: 0.6, maxTokens: 5000 });
+  ], { temperature: 0.6, maxTokens: 7000 });
   const polished = humanized.text;
 
   const body = normalizeText(stripLeadingTitle(polished));
@@ -405,7 +405,7 @@ async function genDraft(env: Env, bookId: string, ch: number, outline: ChapterOu
         { CH: ch, CMIN: c.charsMin, CMAX: c.charsMax, TITLE: outline.title, OPENINGS: openings }) },
     { role: "user", content: fill("【本章细纲】\n{{OUTLINE}}\n\n【当前关键角色状态】\n{{MEMORY}}\n\n【上一章结尾】\n{{TAIL}}",
         { OUTLINE: JSON.stringify(outline), MEMORY: memorySlim, TAIL: tail }) },
-  ], { temperature: 0.85, maxTokens: 6000 });
+  ], { temperature: 0.85, maxTokens: 7000 });
   return raw.text;
 }
 
@@ -413,7 +413,7 @@ async function polish(env: Env, bookId: string, ch: number, draft: string, memor
   const raw = await chat(env, [
     { role: "system", content: sp + fill(await tpl(env, bookId, "polish", PROMPT_POLISH), { CH: ch, CMIN: c.charsMin, CMAX: c.charsMax }) },
     { role: "user", content: fill("【初稿】\n{{DRAFT}}\n\n【当前世界状态】\n{{MEMORY}}", { DRAFT: draft, MEMORY: memory }) },
-  ], { temperature: 0.6, maxTokens: 6000 });
+  ], { temperature: 0.6, maxTokens: 7000 });
   return raw.text || draft;
 }
 
