@@ -383,6 +383,7 @@ export function compileMemoryContext(p: {
   events?: LoreEntry[];                                  // 近期大事记（时间线）
   recentSums?: { chapter_no: number; summary: string }[]; // 最近10章摘要（滚动短期记忆）
   powerRanks?: PowerRank[];                              // 本书境界体系（决定境界叫法：N层 或 初/中/后/巅峰）
+  settlement?: string;                                   // 上一章收支结算单（代码生成的系统账）
 }): string {
   const realmOf = (c: CharacterState) => `${c.realm_name}${formatRealmSub(p.powerRanks, c.realm_index, c.realm_sub)}`;
   // 截断函数：法宝、功法、丹药等永远只列前 15 个，防止上下文被堆爆
@@ -407,14 +408,29 @@ export function compileMemoryContext(p: {
       return `- ${c.name}${c.aliases.length ? `(${c.aliases.join("/")})` : ""}｜${c.role}｜${c.alive ? "在世" : "已死"}｜境界:${realmOf(c)}｜功法:${truncateList(c.techniques, '功法')}｜近况:${c.status_notes || "—"}${persona ? `｜${persona}` : ""}`;
     }).join("\n");
 
-  // 主角家底单列，同样做“前15种”防膨胀
+  // 主角全部身家单列（系统面板=唯一事实来源），带数量/耐久，前15种防膨胀
+  const fmtCount = (arr?: { name: string; count: number }[]) =>
+    arr?.length
+      ? arr.slice(0, 15).map((x) => `${x.name}×${x.count}`).join("、") + (arr.length > 15 ? `，另有${arr.length - 15}种` : "")
+      : "无";
   const hero = p.chars.find((c) => c.role === "protagonist");
   const heroAssets = hero ? (() => {
     const a = hero.assets || { spirit_stones: 0, pills: [], materials: [], misc: [] };
-    const pills = truncateList(a.pills || [], '丹药');
-    const mats = truncateList(a.materials || [], '材料');
+    const arts = hero.artifacts?.length
+      ? hero.artifacts.slice(0, 15).map((x) => `${x.name}(${x.grade || "?"}·耐久${x.durability ?? "?"})`).join("、")
+      : "无";
     const move = truncateList(hero.movement_arts || [], '身法/神通');
-    return `主角「${hero.name}」当前家底——灵石:${a.spirit_stones}｜丹药:${pills}｜材料:${mats}\n主角已习得身法/神通:${move}（本章只能动用此清单内能力，新能力须经剧情习得并交代来历）`;
+    const misc = a.misc?.length ? a.misc.slice(0, 15).join("、") : "无";
+    return [
+      `主角「${hero.name}」全部身家（系统面板·唯一事实来源）：`,
+      `- 灵石：${a.spirit_stones} 块`,
+      `- 丹药：${fmtCount(a.pills)}`,
+      `- 材料：${fmtCount(a.materials)}`,
+      `- 法宝/器物：${arts}`,
+      `- 杂项：${misc}`,
+      `- 身法/神通/秘术：${move}`,
+      `【道具白名单硬规则】本章主角动用、消耗、"从怀里摸出"的任何丹药/法宝/符箓/材料/能力，必须出自上述清单，清单里没有的东西绝不存在；剧情需要新道具，必须先写清获得经过（缴获/购买/赠予/炼制）才能使用；消耗任何物品不得超过清单数量。`,
+    ].join("\n");
   })() : "（无主角记录）";
 
   // 伏笔按重要度→建议回收章排序，封顶 20（S 级硬记忆只留最关键的）
@@ -463,6 +479,7 @@ export function compileMemoryContext(p: {
     `【主线进度】\n${p.mainNode ? JSON.stringify(p.mainNode) : "（起始）"}`,
     `【已探索地图/势力（近40）】\n${map40.join("、") || "（无）"}`,
     `【主角家底与已习得能力（硬约束·面板为准）】\n${heroAssets}`,
+    p.settlement ? `【上一章收支结算（系统对账单·与本章衔接的账目起点）】\n${p.settlement}` : "",
     `【在世/关键角色状态（按活跃度，最多25）】\n${charLines || "（暂无）"}`,
     loreLines ? `【本章相关设定卡（硬设定·不得违背，神通克制关系以此为准）】\n${loreLines}` : "",
     edgeLines ? `【相关人物/势力关系网（知识图谱）】\n${edgeLines}` : "",

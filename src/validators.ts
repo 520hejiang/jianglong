@@ -142,6 +142,22 @@ export function validateDelta(
       }
     }
 
+    // --- 规则7.5：物品消耗不得超过库存（面板是唯一事实，AI 不许花不存在的东西）---
+    for (const kind of ["add_pills", "add_materials"] as const) {
+      for (const item of (cu[kind] || [])) {
+        if (typeof item?.count !== "number" || item.count >= 0) continue; // 只查消耗
+        const stockList = kind === "add_pills" ? prev?.assets?.pills : prev?.assets?.materials;
+        const stock = stockList?.find((x) => x.name === item.name)?.count ?? 0;
+        if (-item.count > stock) {
+          issues.push({
+            level: stock === 0 ? "warn" : "block", // 完全没这东西可能是命名不一致，warn 人工核；有但不够则必错，block
+            rule: "ITEM_OVERDRAW",
+            detail: `「${cu.name}」消耗${kind === "add_pills" ? "丹药" : "材料"}「${item.name}」${-item.count}份，但面板库存仅 ${stock}——花了不存在的东西，账目不自洽。`,
+          });
+        }
+      }
+    }
+
     // --- 规则8：新增能力必须有交待 ---
     for (const m of cu.add_movement_arts || []) {
       if (!m.kind) {

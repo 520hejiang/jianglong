@@ -89,9 +89,10 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
       const last = await M.lastChapter(env, bookId);
       const recentSums = await M.recentSummaries(env, bookId, 10);
       const events = await M.recentEvents(env, bookId, 8);
+      const settlement: string = (await M.getPlot(env, bookId, "last_settlement")) || "";
       const baseMem = M.compileMemoryContext({
         chars, fores, mainNode, exploredMap, relevant: [], currentPlane, storyDigest,
-        events, recentSums, powerRanks,
+        events, recentSums, powerRanks, settlement,
         lastSummary: last?.summary || "", lastTail: last?.ending_tail || "",
       });
       const extractRaw = await chat(env, [
@@ -109,7 +110,7 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
       const edges = await M.edgesFor(env, bookId, entities, 20);
       const memory = M.compileMemoryContext({
         chars, fores, mainNode, exploredMap, relevant, currentPlane, storyDigest,
-        lore, edges, events, recentSums, powerRanks,
+        lore, edges, events, recentSums, powerRanks, settlement,
         lastSummary: last?.summary || "", lastTail: last?.ending_tail || "",
       });
       const ops = await M.recentOpenings(env, bookId, 5);
@@ -259,9 +260,14 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
       }
       const hero = (await M.loadCharacters(env, bookId)).find((x) => x.role === "protagonist");
       const heroLine = hero ? `${hero.name} ${hero.realm_name}${M.formatRealmSub(powerRanks, hero.realm_index, hero.realm_sub)}｜灵石${hero.assets?.spirit_stones ?? 0}` : "—";
+
+      // 章末结算单（代码生成的系统账）：存档喂给下一章当账目锚点，也发通知供人工核对
+      const settlement = settlementText(delta, hero, ch);
+      await M.setPlot(env, bookId, "last_settlement", settlement);
+
       const rewrites = st.attempt || 0;
       const qc = issuesText.length ? `\n质检: ${issuesText.join("；").slice(0, 300)}` : "";
-      await tg(env, `📖 <b>${book.title}</b> 第${ch}章 ${title}（${wc}字｜重写${rewrites}次）\n摘要: ${delta.summary || "—"}\n主角: ${heroLine}${qc}`);
+      await tg(env, `📖 <b>${book.title}</b> 第${ch}章 ${title}（${wc}字｜重写${rewrites}次）\n摘要: ${delta.summary || "—"}\n主角: ${heroLine}\n${settlement}${qc}`);
 
       return { ...st, stage: "complete", title, wc, issues: issuesText };
     }
@@ -502,6 +508,31 @@ async function applyDelta(env: Env, bookId: string, ch: number, d: StateDelta, b
     const cur: string[] = (await M.getPlot(env, bookId, "open_threads")) || [];
     await M.setPlot(env, bookId, "open_threads", Array.from(new Set([...cur, ...d.plot.open_threads])).slice(-50));
   }
+}
+
+// 章末结算单：从本章状态增量里把主角的收获/消耗逐笔列出（纯代码，零算术风险），
+// 期末余额取应用增量后的面板实数。喂给下一章，让模型对"刚刚发生的账"零猜测。
+function settlementText(d: StateDelta, hero: import("./types").CharacterState | undefined, ch: number): string {
+  const cu = hero ? d.characters.find((x) => x.name === hero.name) : undefined;
+  const gains: string[] = [];
+  const costs: string[] = [];
+  if (cu) {
+    const moves = cu.stone_moves?.length
+      ? cu.stone_moves
+      : (typeof cu.spirit_stones_delta === "number" && cu.spirit_stones_delta !== 0
+          ? [{ amount: cu.spirit_stones_delta, note: undefined as string | undefined }] : []);
+    for (const m of moves) {
+      if (typeof m?.amount !== "number" || m.amount === 0) continue;
+      (m.amount > 0 ? gains : costs).push(`灵石${m.amount > 0 ? "+" : ""}${m.amount}${m.note ? `(${m.note})` : ""}`);
+    }
+    for (const p of cu.add_pills || []) (p.count >= 0 ? gains : costs).push(`${p.name}${p.count >= 0 ? "+" : ""}${p.count}`);
+    for (const m of cu.add_materials || []) (m.count >= 0 ? gains : costs).push(`${m.name}${m.count >= 0 ? "+" : ""}${m.count}`);
+    for (const a of cu.add_artifacts || []) gains.push(`法宝「${a.name}」`);
+    for (const t of cu.add_techniques || []) gains.push(`功法《${t.name}》`);
+    for (const mv of cu.add_movement_arts || []) gains.push(`神通/身法「${mv.name}」`);
+  }
+  const bal = hero ? `期末灵石=${hero.assets?.spirit_stones ?? 0}块` : "";
+  return `第${ch}章系统结算｜收获：${gains.join("、") || "无"}｜消耗：${costs.join("、") || "无"}｜${bal}`;
 }
 
 function stripLeadingTitle(t: string): string {

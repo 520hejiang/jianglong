@@ -166,6 +166,10 @@ async function main() {
   let expStones = seedStones; for (let ch = 1; ch <= N; ch++) expStones += spiritDelta(ch);
   ok(hero.assets.spirit_stones === expStones, '灵石账目逐章自洽(流水由代码求和)', `账面 ${hero.assets.spirit_stones} / 期望 ${expStones}`);
 
+  // 章末结算单：代码生成、落库、期末余额与面板一致
+  const settle = await memory.getPlot(env, bookId, 'last_settlement');
+  ok(typeof settle === 'string' && settle.includes(`期末灵石=${expStones}块`), '章末结算单落库且期末余额=面板实数', String(settle).slice(0, 60));
+
   // 账本泄漏检测：正文报总余额必须被抓，单笔流水不误伤
   const leak1 = validators.detectLedgerLeaks('他数了数，全部家当只剩三块下品灵石，心里发苦。');
   const leak2 = validators.detectLedgerLeaks('他摸出两块灵石拍在案上，又缴获七块下品灵石。');
@@ -232,6 +236,12 @@ async function main() {
   ok(fire([mkChar({ assets: { spirit_stones: 10, pills: [], materials: [], misc: [] } })], { characters: [{ name: '陆长安', spirit_stones_delta: -50 }], foreshadow_new: [], foreshadow_update: [], plot: {} }, baseOpts, 'ASSET_NEGATIVE'), '规则 ASSET_NEGATIVE 拦截灵石花成负数');
   ok(fire([mkChar({ realm_index: 4 })], { characters: [{ name: '陆长安', realm_index: 6, status_notes: '闭关' }], foreshadow_new: [], foreshadow_update: [], plot: {} }, baseOpts, 'PLANE_REALM_MISMATCH'), '规则 PLANE_REALM_MISMATCH 拦截未飞升越位面境界');
   ok(fire([mkChar({})], { characters: [{ name: '陆长安', add_movement_arts: [{ name: '神秘瞳术', kind: '' }] }], foreshadow_new: [], foreshadow_update: [], plot: {} }, baseOpts, 'SKILL_NO_SOURCE'), '规则 SKILL_NO_SOURCE 提示身法无出处');
+  const overdraw = fire([mkChar({ assets: { spirit_stones: 10, pills: [{ name: '疗伤丹', count: 1 }], materials: [], misc: [] } })],
+    { characters: [{ name: '陆长安', add_pills: [{ name: '疗伤丹', count: -3 }] }], foreshadow_new: [], foreshadow_update: [], plot: {} }, baseOpts, 'ITEM_OVERDRAW');
+  ok(overdraw && overdraw.level === 'block', '规则 ITEM_OVERDRAW 拦截消耗超库存(有1颗吃3颗)');
+  const ghostItem = fire([mkChar({})],
+    { characters: [{ name: '陆长安', add_pills: [{ name: '九转还魂丹', count: -1 }] }], foreshadow_new: [], foreshadow_update: [], plot: {} }, baseOpts, 'ITEM_OVERDRAW');
+  ok(ghostItem && ghostItem.level === 'warn', '规则 ITEM_OVERDRAW 提示消耗不存在的物品(warn防命名误伤)');
 
   // ---- Part C: 断点续传(advanceBook)——模拟"每走一步就被掐断"，确认仍能接力完成整章 ----
   console.log(`\n${C.y}== 断点续传测试（每次只跑一步，模拟被平台掐断后续传）==${C.x}`);
