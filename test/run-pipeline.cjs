@@ -166,6 +166,12 @@ async function main() {
   let expStones = seedStones; for (let ch = 1; ch <= N; ch++) expStones += spiritDelta(ch);
   ok(hero.assets.spirit_stones === expStones, '灵石账目逐章自洽(流水由代码求和)', `账面 ${hero.assets.spirit_stones} / 期望 ${expStones}`);
 
+  // 幂等落库：同一章同版本重复保存不再撞 UNIQUE(死循环修复)，且只保留一行
+  await memory.saveChapter(env, bookId, { chapter_no: 3, title: '重存测试', outline: '{}', content: '第3章 重存测试\n\n覆盖内容', summary: 's', ending_tail: 't', tags: ['重存'], word_count: 4, version: 1, qc_report: '{}' });
+  const dupRows = await env.DB.prepare("SELECT COUNT(*) c FROM chapters WHERE book_id=? AND chapter_no=3 AND version=1").bind(bookId).first();
+  const dupContent = await env.DB.prepare("SELECT title FROM chapters WHERE book_id=? AND chapter_no=3 AND version=1").bind(bookId).first();
+  ok(dupRows.c === 1 && dupContent.title === '重存测试', '章节重复保存幂等覆盖(UNIQUE死循环修复)', `行数${dupRows.c}`);
+
   // 章末结算单：代码生成、落库、期末余额与面板一致
   const settle = await memory.getPlot(env, bookId, 'last_settlement');
   ok(typeof settle === 'string' && settle.includes(`期末灵石=${expStones}块`), '章末结算单落库且期末余额=面板实数', String(settle).slice(0, 60));

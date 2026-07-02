@@ -281,7 +281,13 @@ async function runStep(env: Env, bookId: string, st: GenState): Promise<GenState
         return { ...st, stage: "complete", title, wc, issues: issuesText };
       }
 
-      await applyDelta(env, bookId, ch, delta, charMap);
+      // 记账幂等标记：finalize 被掐断重跑时，绝不把同一章的灵石/物品增量应用两遍
+      const appliedKey = `${ch}:v${st.version}`;
+      const alreadyApplied = (await M.getPlot(env, bookId, "__applied")) === appliedKey;
+      if (!alreadyApplied) {
+        await applyDelta(env, bookId, ch, delta, charMap);
+        await M.setPlot(env, bookId, "__applied", appliedKey);
+      }
       if (ch === book.next_chapter) {
         await env.DB.prepare(
           "UPDATE books SET next_chapter=?, total_chars=total_chars+?, cursor_volume=?, updated_at=? WHERE id=?"

@@ -169,6 +169,17 @@ export function validateDelta(
       }
     }
 
+    // --- 规则8.5：新增法宝必须有来历（防"幽灵法宝"污染面板） ---
+    for (const a of cu.add_artifacts || []) {
+      if (!a.note) {
+        issues.push({
+          level: "warn",
+          rule: "ARTIFACT_NO_SOURCE",
+          detail: `「${cu.name}」新增法宝「${a.name}」未注明获得来历（缴获/购买/赠予/炼成），疑似凭空登记，请核对正文。`,
+        });
+      }
+    }
+
     // --- 规则9：新增角色境界大检视（防凭空出世的高手）---
     if (!prev && cu.name) {
       if (typeof cu.realm_index === "number" && cu.realm_index > maxExistingRealm + 3) {
@@ -238,6 +249,13 @@ export function detectSlop(text: string): SlopReport {
     const boring = lines.filter((p) => /^[他她这那]/.test(p)).length;
     if (boring / lines.length > 0.45) reasons.push(`段首单调(${boring}/${lines.length}段以他/她/这/那起头，超45%)`);
   }
+
+  // 章内高频短语复读：同一生理反应单章刷3次以上（实测"眼前发黑"一章能出现四五次）
+  const OVERUSED = ["眼前发黑", "眼前一黑", "腥甜", "冷汗", "铁锈味", "咬紧牙关"];
+  for (const p of OVERUSED) {
+    const n = text.split(p).length - 1;
+    if (n >= 3) reasons.push(`「${p}」单章出现${n}次(上限2次，换写法)`);
+  }
   return { hit: reasons.length > 0, reasons };
 }
 
@@ -253,6 +271,8 @@ const LEDGER_PATTERNS = [
   /灵[石晶]袋[^\n]{0,8}[\d一二两三四五六七八九十百千]+\s*[块枚颗粒]/g,
   // 清点式收尾："十六块下品灵石，全在/还在/没动"
   /[\d一二两三四五六七八九十百千]+\s*[块枚颗粒]\s*[下中上极品]{0,2}\s*灵[石晶][^。！？\n]{0,6}(全在|还在|尚在|没动|未动|分文未少)/g,
+  // 倒装盘点："灵石只剩两块"
+  /灵[石晶][^。！？\n]{0,4}(只剩|还剩|仅剩|剩下)[^。！？\n]{0,4}[\d一二两三四五六七八九十百千]+\s*[块枚颗粒]/g,
 ];
 const TXN_VERBS = /摸出|掏出|取出|拿出|递|拍在|扔|抛|付|花了|花去|买|换|缴获|得了|收下|塞|数出|甩/;
 

@@ -304,9 +304,15 @@ export async function saveChapter(env: Env, bookId: string, ch: {
   summary: string; ending_tail: string; tags: string[]; word_count: number;
   version: number; qc_report: string;
 }) {
+  // 幂等落库：finalize 若在存章后被平台掐断，断点重跑会再次插入同一章。
+  // ON CONFLICT 直接覆盖，杜绝 UNIQUE constraint 死循环。
   await env.DB.prepare(
     `INSERT INTO chapters (id,book_id,chapter_no,title,outline,content,summary,ending_tail,tags,word_count,status,version,qc_report,created_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,'done',?,?,?)`
+     VALUES (?,?,?,?,?,?,?,?,?,?,'done',?,?,?)
+     ON CONFLICT(book_id,chapter_no,version) DO UPDATE SET
+       title=excluded.title, outline=excluded.outline, content=excluded.content,
+       summary=excluded.summary, ending_tail=excluded.ending_tail, tags=excluded.tags,
+       word_count=excluded.word_count, status='done', qc_report=excluded.qc_report`
   ).bind(
     uid(), bookId, ch.chapter_no, ch.title, ch.outline, ch.content, ch.summary,
     ch.ending_tail, J(ch.tags), ch.word_count, ch.version, ch.qc_report, now()
